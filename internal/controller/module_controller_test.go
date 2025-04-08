@@ -30,7 +30,7 @@ import (
 	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
 )
 
-var _ = Describe("TFModule Controller", func() {
+var _ = Describe("Module Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -40,13 +40,13 @@ var _ = Describe("TFModule Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		tfmodule := &tfreconcilev1alpha1.TFModule{}
+		module := &tfreconcilev1alpha1.Module{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind TFModule")
-			err := k8sClient.Get(ctx, typeNamespacedName, tfmodule)
+			By("creating the custom resource for the Kind Module")
+			err := k8sClient.Get(ctx, typeNamespacedName, module)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &tfreconcilev1alpha1.TFModule{
+				resource := &tfreconcilev1alpha1.Module{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
@@ -59,16 +59,16 @@ var _ = Describe("TFModule Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &tfreconcilev1alpha1.TFModule{}
+			resource := &tfreconcilev1alpha1.Module{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance TFModule")
+			By("Cleanup the specific resource instance Module")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &TFModuleReconciler{
+			controllerReconciler := &ModuleReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}

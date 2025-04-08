@@ -202,11 +202,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.TFModuleReconciler{
+	if err = (&controller.ModuleReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "TFModule")
+		setupLog.Error(err, "unable to create controller", "controller", "Module")
 		os.Exit(1)
 	}
 	if err = (&controller.WorkspaceReconciler{

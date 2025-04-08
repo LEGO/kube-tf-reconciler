@@ -14,7 +14,7 @@ resources:
   controller: true
   domain: lukaspj.io
   group: tf-reconcile
-  kind: TFModule
+  kind: Module
   path: lukaspj.io/kube-tf-reconciler/api/v1alpha1
   version: v1alpha1
 - api:

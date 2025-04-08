@@ -27,26 +27,26 @@ import (
 	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
 )
 
-// TFModuleReconciler reconciles a TFModule object
-type TFModuleReconciler struct {
+// ModuleReconciler reconciles a Module object
+type ModuleReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=tf-reconcile.lukaspj.io,resources=tfmodules,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=tf-reconcile.lukaspj.io,resources=tfmodules/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=tf-reconcile.lukaspj.io,resources=tfmodules/finalizers,verbs=update
+// +kubebuilder:rbac:groups=tf-reconcile.lukaspj.io,resources=modules,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=tf-reconcile.lukaspj.io,resources=modules/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=tf-reconcile.lukaspj.io,resources=modules/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the TFModule object against the actual cluster state, and then
+// the Module object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.4/pkg/reconcile
-func (r *TFModuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *ModuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = logf.FromContext(ctx)
 
 	// TODO(user): your logic here
@@ -55,9 +55,9 @@ func (r *TFModuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *TFModuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *ModuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&tfreconcilev1alpha1.TFModule{}).
+		For(&tfreconcilev1alpha1.Module{}).
 		Named("tfmodule").
 		Complete(r)
 }

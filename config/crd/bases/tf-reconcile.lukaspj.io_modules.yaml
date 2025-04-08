@@ -4,20 +4,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.2
-  name: tfmodules.tf-reconcile.lukaspj.io
+  name: modules.tf-reconcile.lukaspj.io
 spec:
   group: tf-reconcile.lukaspj.io
   names:
-    kind: TFModule
-    listKind: TFModuleList
-    plural: tfmodules
-    singular: tfmodule
+    kind: Module
+    listKind: ModuleList
+    plural: modules
+    singular: module
   scope: Namespaced
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: TFModule is the Schema for the tfmodules API.
+        description: Module is the Schema for the modules API.
         properties:
           apiVersion:
             description: |-
@@ -37,16 +37,43 @@ spec:
           metadata:
             type: object
           spec:
-            description: TFModuleSpec defines the desired state of TFModule.
+            description: ModuleSpec defines the desired state of Module.
             properties:
-              foo:
-                description: Foo is an example field of TFModule. Edit tfmodule_types.go
-                  to remove/update
+              inputs:
+                description: Inputs are the inputs to the terraform module.
+                x-kubernetes-preserve-unknown-fields: true
+              outputs:
+                description: Outputs are the outputs of the terraform module.
+                items:
+                  properties:
+                    name:
+                      description: Name is the name of the output
+                      type: string
+                    value:
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                type: array
+              source:
+                description: |-
+                  Source is the source of the terraform module.
+                  Example:
+                  source:  "terraform-aws-modules/vpc/aws"
+                  version: "5.19.0"
                 type: string
+              version:
+                description: Version is the version of the terraform module.
+                type: string
+            required:
+            - source
             type: object
           status:
-            description: TFModuleStatus defines the observed state of TFModule.
+            description: ModuleStatus defines the observed state of Module.
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

@@ -7,8 +7,8 @@ rules:
 - apiGroups:
   - tf-reconcile.lukaspj.io
   resources:
+  - modules
   - providers
-  - tfmodules
   - workspaces
   verbs:
   - create
@@ -21,16 +21,16 @@ rules:
 - apiGroups:
   - tf-reconcile.lukaspj.io
   resources:
+  - modules/finalizers
   - providers/finalizers
-  - tfmodules/finalizers
   - workspaces/finalizers
   verbs:
   - update
 - apiGroups:
   - tf-reconcile.lukaspj.io
   resources:
+  - modules/status
   - providers/status
-  - tfmodules/status
   - workspaces/status
   verbs:
   - get
