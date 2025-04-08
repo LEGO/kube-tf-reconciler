@@ -1,0 +1,9 @@
+apiVersion: tf-reconcile.lukaspj.io/v1alpha1
+kind: Workspace
+metadata:
+  labels:
+    app.kubernetes.io/name: kube-tf-reconciler
+    app.kubernetes.io/managed-by: kustomize
+  name: workspace-sample
+spec:
+  # TODO(user): Add fields here

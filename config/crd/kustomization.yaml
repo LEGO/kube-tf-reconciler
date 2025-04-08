@@ -3,6 +3,8 @@
 # It should be run by config/default
 resources:
 - bases/tf-reconcile.lukaspj.io_tfmodules.yaml
+- bases/tf-reconcile.lukaspj.io_workspaces.yaml
+- bases/tf-reconcile.lukaspj.io_providers.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

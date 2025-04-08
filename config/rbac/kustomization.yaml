@@ -22,6 +22,12 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the {{ .ProjectName }} itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- provider_admin_role.yaml
+- provider_editor_role.yaml
+- provider_viewer_role.yaml
+- workspace_admin_role.yaml
+- workspace_editor_role.yaml
+- workspace_viewer_role.yaml
 - tfmodule_admin_role.yaml
 - tfmodule_editor_role.yaml
 - tfmodule_viewer_role.yaml
