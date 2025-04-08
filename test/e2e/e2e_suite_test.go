@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"io.lukaspj/kube-tf-reconciler/test/utils"
+	"lukaspj.io/kube-tf-reconciler/test/utils"
 )
 
 var (

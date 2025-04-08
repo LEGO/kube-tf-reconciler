@@ -2,9 +2,9 @@
 # This file is used to track the info used to scaffold your project
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
-domain: io.lukaspj
+domain: lukaspj.io
 layout:
 - go.kubebuilder.io/v4
 projectName: kube-tf-reconciler
-repo: io.lukaspj/kube-tf-reconciler
+repo: lukaspj.io/kube-tf-reconciler
 version: "3"
