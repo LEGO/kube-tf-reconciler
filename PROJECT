@@ -7,4 +7,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: kube-tf-reconciler
 repo: lukaspj.io/kube-tf-reconciler
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: lukaspj.io
+  group: tf-reconcile
+  kind: TFModule
+  path: lukaspj.io/kube-tf-reconciler/api/v1alpha1
+  version: v1alpha1
 version: "3"

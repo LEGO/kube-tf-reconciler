@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- tf-reconcile_v1alpha1_tfmodule.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
