@@ -21,11 +21,12 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	v1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
 )
@@ -38,7 +39,7 @@ var _ = Describe("Workspace Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
 		workspace := &tfreconcilev1alpha1.Workspace{}
 
@@ -51,7 +52,61 @@ var _ = Describe("Workspace Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: tfreconcilev1alpha1.WorkspaceSpec{
+						Backend: tfreconcilev1alpha1.BackendSpec{
+							Type: "s3",
+							Inputs: &apiextensionsv1.JSON{
+								Raw: []byte(`{"bucket": "my-bucket"}`),
+							},
+						},
+						ProviderRefs: []tfreconcilev1alpha1.ProviderRef{
+							{
+								Name:      "aws",
+								Namespace: "default",
+							},
+						},
+						Module: &tfreconcilev1alpha1.ModuleSpec{
+							Source:  "terraform-aws-modules/vpc/aws",
+							Version: "5.19.0",
+						},
+						WorkerSpec: &v1.PodSpec{
+							Containers: []v1.Container{
+								{
+									Name:       "worker",
+									Image:      "hashicorp/terraform:1.11",
+									Args:       []string{"version"},
+									WorkingDir: "/workspace",
+									EnvFrom:    nil,
+									Env:        nil,
+									Resources:  v1.ResourceRequirements{},
+									VolumeMounts: []v1.VolumeMount{
+										{
+											Name:      "workspace",
+											MountPath: "/workspace",
+										},
+									},
+									LivenessProbe:   nil,
+									ReadinessProbe:  nil,
+									StartupProbe:    nil,
+									Lifecycle:       nil,
+									ImagePullPolicy: v1.PullIfNotPresent,
+									SecurityContext: nil,
+								},
+							},
+							Volumes: []v1.Volume{
+								{
+									Name: "workspace",
+									VolumeSource: v1.VolumeSource{
+										ConfigMap: &v1.ConfigMapVolumeSource{
+											LocalObjectReference: v1.LocalObjectReference{
+												Name: "workspace-config",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

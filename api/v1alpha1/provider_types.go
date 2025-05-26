@@ -25,11 +25,10 @@ import (
 
 // ProviderSpec defines the desired state of Provider.
 type ProviderSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// Foo is an example field of Provider. Edit provider_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	Source string `json:"source"`
+	// Version is the version of the provider.
+	// +kubebuilder:validation:Optional
+	Version string `json:"version,omitempty"`
 }
 
 // ProviderStatus defines the observed state of Provider.

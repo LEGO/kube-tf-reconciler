@@ -6,4 +6,25 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: workspace-sample
 spec:
-  # TODO(user): Add fields here
+  backend:
+    type: s3
+  providerRefs:
+    - name: test
+  module:
+    source: "./modules/customer"
+  workerSpec:
+    restartPolicy: Never
+    containers:
+      - name: worker
+        image: hashicorp/terraform:1.11
+        args:
+          - "version"
+        workingDir: /workspace
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        imagePullPolicy: IfNotPresent
+    volumes:
+      - name: workspace
+        configMap:
+            name: workspace-config

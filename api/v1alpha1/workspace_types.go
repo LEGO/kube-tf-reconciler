@@ -17,19 +17,45 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// ProviderRef is a reference to a provider
+type ProviderRef struct {
+	// Name is the name of the provider
+	Name string `json:"name"`
+	// Namespace is the namespace of the provider
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// BackendSpec defines the backend configuration for the workspace
+type BackendSpec struct {
+	// Type is the type of the backend
+	// +kubebuilder:validation:Enum=local;remote;s3;gcs;azurerm;oss;consul;cos;http;pg;kubernetes
+	Type string `json:"type"`
+	// Inputs are the inputs to the terraform module.
+	Inputs *apiextensionsv1.JSON `json:"inputs,omitempty"`
+}
 
 // WorkspaceSpec defines the desired state of Workspace.
 type WorkspaceSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Backend is the backend configuration for the workspace
+	// +kubebuilder:validation:Required
+	Backend BackendSpec `json:"backend"`
 
-	// Foo is an example field of Workspace. Edit workspace_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// ProviderRefs is a list of provider references
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinSize=1
+	ProviderRefs []ProviderRef `json:"providerRefs,omitempty"`
+
+	// Module is the module configuration for the workspace
+	// +kubebuilder:validation:Required
+	Module *ModuleSpec `json:"module"`
+
+	// WorkerSpec is the worker configuration for the workspace
+	WorkerSpec *v1.PodSpec `json:"workerSpec,omitempty"`
 }
 
 // WorkspaceStatus defines the observed state of Workspace.
@@ -38,10 +64,9 @@ type WorkspaceStatus struct {
 	// Important: Run "make" to regenerate code after modifying this file
 }
 
+// Workspace is the Schema for the workspaces API.
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-
-// Workspace is the Schema for the workspaces API.
 type Workspace struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -50,9 +75,8 @@ type Workspace struct {
 	Status WorkspaceStatus `json:"status,omitempty"`
 }
 
-// +kubebuilder:object:root=true
-
 // WorkspaceList contains a list of Workspace.
+// +kubebuilder:object:root=true
 type WorkspaceList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -50,6 +51,22 @@ var _ = Describe("Module Controller", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
+					},
+					Spec: &tfreconcilev1alpha1.ModuleSpec{
+						Source: "terraform-aws-modules/vpc/aws",
+						Inputs: &apiextensionsv1.JSON{
+							Raw: []byte(`{
+	"minimum_password_length": 37,
+	"require_numbers": false,
+	"trusted_role_arns": [
+		"arn:aws:iam::307990089504:root",
+		"arn:aws:iam::835367859851:user/anton"
+	],
+	"tags": {
+		"Role": "test"
+  }
+}`),
+						},
 					},
 					// TODO(user): Specify other spec details if needed.
 				}

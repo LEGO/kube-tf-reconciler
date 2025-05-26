@@ -57,8 +57,8 @@ type Module struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   ModuleSpec   `json:"spec"`
-	Status ModuleStatus `json:"status,omitempty"`
+	Spec   *ModuleSpec   `json:"spec"`
+	Status *ModuleStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
