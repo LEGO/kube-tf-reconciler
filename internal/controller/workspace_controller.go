@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
 	"lukaspj.io/kube-tf-reconciler/pkg/render"
 	"lukaspj.io/kube-tf-reconciler/pkg/runner"
@@ -110,8 +111,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("failed to render workspace %s: %w", req.String(), err)
 	}
 
-	ws.Status.CurrentRender = string(result)
-	err = r.Client.Status().Update(ctx, &ws)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+			return err
+		}
+		ws.Status.CurrentRender = string(result)
+		return r.Client.Status().Update(ctx, &ws)
+	})
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
 	}
@@ -125,8 +131,14 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to validate workspace: %w", err)
 	}
-	ws.Status.ValidRender = valResult.Valid
-	err = r.Client.Status().Update(ctx, &ws)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+			return err
+		}
+		ws.Status.ValidRender = valResult.Valid
+		return r.Client.Status().Update(ctx, &ws)
+	})
+
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
 	}
@@ -145,7 +157,15 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{}, err
 			}
 			ws.Status.ObservedGeneration = ws.Generation
-			return ctrl.Result{}, r.Client.Status().Update(ctx, &ws)
+			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+					return err
+				}
+				ws.Status.ValidRender = valResult.Valid
+				return r.Client.Status().Update(ctx, &ws)
+			})
+
+			return ctrl.Result{}, err
 
 		}
 		// Stop reconciliation as resource is being deleted
@@ -171,8 +191,14 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("failed to show plan file: %w", err)
 	}
 	r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFPlanEventReason, "Workspace %s planned", req.String())
-	ws.Status.LatestPlan = plan
-	err = r.Client.Status().Update(ctx, &ws)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+			return err
+		}
+		ws.Status.LatestPlan = plan
+		return r.Client.Status().Update(ctx, &ws)
+	})
+
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
 	}
@@ -189,8 +215,14 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFApplyEventReason, "Workspace %s applied", req.String())
 	}
 
-	ws.Status.ObservedGeneration = ws.Generation
-	return ctrl.Result{}, r.Client.Status().Update(ctx, &ws)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+			return err
+		}
+		ws.Status.ObservedGeneration = ws.Generation
+		return r.Client.Status().Update(ctx, &ws)
+	})
+	return ctrl.Result{}, err
 }
 
 func (r *WorkspaceReconciler) renderHcl(workspaceDir string, ws tfreconcilev1alpha1.Workspace) ([]byte, error) {
