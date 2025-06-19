@@ -55,12 +55,18 @@ spec:
 ```
 
 
-## Debugging
+## Debugging in a live cluster
 
 To debug the operator locally:
 
 1. build the debug image:
 ```bash
+docker build -f Dockerfile.debug -t krec:debug .
+```
+
+*ALTERNATIVELY, with minikube it's possible to directly build images into minikube's internal Docker Engine, which makes step 2 unneccessary*
+```bash
+eval $(minikube docker-env)
 docker build -f Dockerfile.debug -t krec:debug .
 ```
 
@@ -73,14 +79,14 @@ kind load docker-image krec:debug
 minikube image load krec:debug
 ```
 
-3. Deploy the operator with the debug image:
+3. Deploy the operator with the debug image (make sure the CRD is installed beforehand):
 ```bash
-kubectl set image deployment/xxxxx krec=krec:debug
+kubectl apply -f samples/debug-deployment.yaml
 ```
 
 4. Set up port forwarding:
 ```bash
-kubectl port-forward deployment/xxxxx 2345:2345
+kubectl port-forward -n krec-debug svc/krec-debug 2345:2345
 ```
 
 5. Connect your debugger:
