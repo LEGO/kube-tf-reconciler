@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: krec-debug
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: krec-debug
+  namespace: krec-debug
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: krec-debug
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: krec-debug
+    namespace: krec-debug
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: krec-debug
+  namespace: krec-debug
+spec:
+  ports:
+  - port: 2345
+    targetPort: 2345
+    name: delve
+  selector:
+    app: krec-debug
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: krec-debug
+  namespace: krec-debug
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: krec-debug
+  template:
+    metadata:
+      labels:
+        app: krec-debug
+    spec:
+      serviceAccountName: krec-debug
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      volumes:
+        - name: terraform-data
+          emptyDir: {}
+      containers:
+      - name: krec
+        image: krec-debug:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          readOnlyRootFilesystem: true 
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+            add: ["SYS_PTRACE"]
+        volumeMounts:
+          - mountPath: /tmp
+            name: terraform-data
+        ports:
+        - containerPort: 2345
+          name: delve
+        env:
+        - name: KREC_NAMESPACE
+          value: "krec-debug"
+        - name: KREC_WORKSPACE_PATH
+          value: "/tmp/workspaces"
+---
