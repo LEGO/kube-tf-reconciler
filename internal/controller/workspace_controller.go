@@ -151,6 +151,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 
 			r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFDestroyEventReason, "Successfully destroyed resources")
+			log.Info("deleted workspace")
 
 			controllerutil.RemoveFinalizer(&ws, workspaceFinalizer)
 			if err := r.Update(ctx, &ws); err != nil {
@@ -214,6 +215,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFApplyEventReason, "Workspace %s applied", req.String())
 	}
+
+	log.WithValues("changed", changed).Info("applied workspace")
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
