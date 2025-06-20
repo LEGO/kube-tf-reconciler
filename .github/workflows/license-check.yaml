@@ -27,6 +27,9 @@ jobs:
             # Required: Define the repo path to the go.mod file used by the
             # build target
             go-mod-path: go.mod
+
+            snapshot-ref: ${{ github.ref }}
+            
             #
             # Optional: Define the path of a build target (a file with a
             # `main()` function) If not defined, this Action will collect all
