@@ -74,7 +74,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	// Clean up temporary token file at the end of reconciliation
+	// Clean up temporary AWS token file at the end of reconciliation
 	if tempTokenPath, exists := envs["AWS_WEB_IDENTITY_TOKEN_FILE"]; exists {
 		defer func() {
 			if err := os.Remove(tempTokenPath); err != nil {
