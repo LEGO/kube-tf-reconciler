@@ -29,6 +29,7 @@ jobs:
             go-mod-path: go.mod
 
             snapshot-ref: ${{ github.ref }}
+            snapshot-sha: ${{ github.event.pull_request.head.sha }}
             
             #
             # Optional: Define the path of a build target (a file with a
