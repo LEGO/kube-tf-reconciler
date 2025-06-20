@@ -7,7 +7,7 @@ on:
 
 # The API requires write permission on the repository to submit dependencies
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
