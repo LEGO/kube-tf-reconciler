@@ -33,9 +33,10 @@ jobs:
             # dependencies used by all build targets for the module, which may
             # include Go dependencies used by tests and tooling.
             go-build-target: main.go
-            
+
   dependency-review:
     runs-on: ubuntu-latest
+    needs: go-action-detection
     steps:
       - name: 'Checkout Repository'
         uses: actions/checkout@v4
