@@ -23,6 +23,7 @@ require (
 
 require (
 	dario.cat/mergo v1.0.1 // indirect
+	github.com/OWASP/Go-SCP v2.6.6+incompatible // indirect
 	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/Wox-launcher/Wox v2.0.0-beta.2+incompatible // indirect
 	github.com/agext/levenshtein v1.2.1 // indirect
