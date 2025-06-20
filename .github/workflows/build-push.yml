@@ -2,7 +2,7 @@ name: Build and Push Image to GHCR
 
 on:
   push:
-    branches: [ optimize-everything ]
+    branches: [ main ]
 
 permissions:
   contents: read
