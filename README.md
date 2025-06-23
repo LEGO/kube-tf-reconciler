@@ -1,6 +1,6 @@
 # Kube TF Reconciler
 
-**NOTE**: This project is currently in an early stage of development and is not yet ready for production use.
+**NOTE**: This project is currently developed for internal use, but may later be developed for broader consumption
 
 The Kube TF Reconciler is a kubernetes operator that uses a regular terraform module as input and reconciles all the
 resources defined in the module. It's designed to be multitenant meaning that terraform operations will be executed
