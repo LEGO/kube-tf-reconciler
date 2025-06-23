@@ -101,6 +101,25 @@ type TFSpec struct {
 	Env []EnvVar `json:"env,omitempty"`
 }
 
+// AWSAuthConfig defines the AWS authentication configuration
+type AWSAuthConfig struct {
+	// ServiceAccountName is the name of the ServiceAccount to use for AWS authentication
+	// The ServiceAccount must be in the same namespace as the Workspace
+	// +kubebuilder:validation:Required
+	ServiceAccountName string `json:"serviceAccountName"`
+
+	// RoleARN is the ARN of the AWS IAM role to assume
+	// +kubebuilder:validation:Required
+	RoleARN string `json:"roleARN"`
+}
+
+// AuthenticationSpec defines the authentication configuration for the workspace
+type AuthenticationSpec struct {
+	// AWS authentication configuration
+	// +kubebuilder:validation:Optional
+	AWS *AWSAuthConfig `json:"aws,omitempty"`
+}
+
 // WorkspaceSpec defines the desired state of Workspace.
 type WorkspaceSpec struct {
 	// TerraformVersion is the version of terraform to use
@@ -126,6 +145,14 @@ type WorkspaceSpec struct {
 	// AutoApply is a flag to indicate if the workspace should be automatically applied
 	// +kubebuilder:default=false
 	AutoApply bool `json:"autoApply"`
+
+	// TerraformRC contains the content of the .terraformrc file
+	// +kubebuilder:validation:Optional
+	TerraformRC string `json:"terraformRC,omitempty"`
+
+	// Authentication is the authentication configuration for the workspace
+	// +kubebuilder:validation:Optional
+	Authentication *AuthenticationSpec `json:"authentication,omitempty"`
 }
 
 // WorkspaceStatus defines the observed state of Workspace.

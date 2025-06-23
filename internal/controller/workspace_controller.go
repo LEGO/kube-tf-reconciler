@@ -9,10 +9,12 @@ import (
 
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/hashicorp/terraform-exec/tfexec"
+	authv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
 	"lukaspj.io/kube-tf-reconciler/pkg/render"
@@ -20,13 +22,18 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
-	TFErrEventReason   = "TerraformError"
-	TFPlanEventReason  = "TerraformPlan"
-	TFApplyEventReason = "TerraformApply"
+	TFErrEventReason     = "TerraformError"
+	TFPlanEventReason    = "TerraformPlan"
+	TFApplyEventReason   = "TerraformApply"
+	TFDestroyEventReason = "TerraformDestroy"
+
+	// Finalizer name
+	workspaceFinalizer = "tf-reconcile.lukaspj.io/finalizer"
 )
 
 // WorkspaceReconciler reconciles a Workspace object
@@ -66,7 +73,16 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	tf, err := r.Tf.GetTerraformForWorkspace(ctx, ws)
+	// Clean up temporary token file at the end of reconciliation
+	if tempTokenPath, exists := envs["AWS_WEB_IDENTITY_TOKEN_FILE"]; exists {
+		defer func() {
+			if err := os.Remove(tempTokenPath); err != nil {
+				log.Error(err, "failed to cleanup temp token file", "file", tempTokenPath)
+			}
+		}()
+	}
+
+	tf, terraformRCPath, err := r.Tf.GetTerraformForWorkspace(ctx, ws)
 	if err != nil {
 		err = fmt.Errorf("failed to get terraform executable %s: %w", req.String(), err)
 		r.Recorder.Eventf(&ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
@@ -75,6 +91,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	envs["HOME"] = os.Getenv("HOME")
 	envs["PATH"] = os.Getenv("PATH")
+
+	if terraformRCPath != "" {
+		envs["TF_CLI_CONFIG_FILE"] = terraformRCPath
+	}
 
 	err = tf.SetEnv(envs)
 	if err != nil {
@@ -107,6 +127,35 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	err = r.Client.Status().Update(ctx, &ws)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
+	}
+
+	if !ws.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&ws, workspaceFinalizer) {
+			err = tf.Destroy(ctx)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to destroy resource: %w", err)
+			}
+
+			r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFDestroyEventReason, "Successfully destroyed resources")
+
+			controllerutil.RemoveFinalizer(&ws, workspaceFinalizer)
+			if err := r.Update(ctx, &ws); err != nil {
+				return ctrl.Result{}, err
+			}
+			ws.Status.ObservedGeneration = ws.Generation
+			return ctrl.Result{}, r.Client.Status().Update(ctx, &ws)
+
+		}
+		// Stop reconciliation as resource is being deleted
+		return ctrl.Result{}, nil
+	}
+
+	if !controllerutil.ContainsFinalizer(&ws, workspaceFinalizer) {
+		controllerutil.AddFinalizer(&ws, workspaceFinalizer)
+		if err := r.Update(ctx, &ws); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	changed, err := tf.Plan(ctx, tfexec.Out("plan.out"))
@@ -185,7 +234,7 @@ func (r *WorkspaceReconciler) dueForRefresh(t time.Time, ws tfreconcilev1alpha1.
 }
 
 func (r *WorkspaceReconciler) refreshState(ctx context.Context, ws tfreconcilev1alpha1.Workspace) error {
-	_, err := r.Tf.GetTerraformForWorkspace(ctx, ws)
+	_, _, err := r.Tf.GetTerraformForWorkspace(ctx, ws)
 	if err != nil {
 		return fmt.Errorf("refreshState: failed to get terraform executable %s: %w", ws.Name, err)
 	}
@@ -234,5 +283,56 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws tfreco
 		}
 	}
 
+	// Handle AWS authentication with service account tokens
+	if ws.Spec.Authentication != nil {
+		if ws.Spec.Authentication.AWS != nil {
+			if ws.Spec.Authentication.AWS.ServiceAccountName == "" || ws.Spec.Authentication.AWS.RoleARN == "" {
+				tempTokenPath, err := r.setupAWSAuthentication(ctx, ws)
+				if err != nil {
+					return nil, fmt.Errorf("failed to setup AWS authentication: %w", err)
+				}
+
+				envs["AWS_WEB_IDENTITY_TOKEN_FILE"] = tempTokenPath
+				envs["AWS_ROLE_ARN"] = ws.Spec.Authentication.AWS.RoleARN
+			}
+		}
+	}
+
 	return envs, nil
+}
+
+func (r *WorkspaceReconciler) setupAWSAuthentication(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (string, error) {
+	var sa v1.ServiceAccount
+	err := r.Client.Get(ctx, types.NamespacedName{
+		Namespace: ws.Namespace,
+		Name:      ws.Spec.Authentication.AWS.ServiceAccountName,
+	}, &sa)
+	if err != nil {
+		return "", fmt.Errorf("failed to get service account %s in namespace %s: %w",
+			ws.Spec.Authentication.AWS.ServiceAccountName, ws.Namespace, err)
+	}
+
+	tokenRequest := &authv1.TokenRequest{
+		Spec: authv1.TokenRequestSpec{
+			ExpirationSeconds: func(i int64) *int64 { return &i }(600),
+		},
+	}
+
+	err = r.Client.SubResource("token").Create(ctx, &sa, tokenRequest)
+	if err != nil {
+		return "", fmt.Errorf("failed to create token for service account %s: %w",
+			ws.Spec.Authentication.AWS.ServiceAccountName, err)
+	}
+	tokenFile, err := os.CreateTemp("", fmt.Sprintf("aws-token-%s-%s-*", ws.Namespace, ws.Name))
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp token file: %w", err)
+	}
+	defer tokenFile.Close()
+
+	if _, err := tokenFile.Write([]byte(tokenRequest.Status.Token)); err != nil {
+		os.Remove(tokenFile.Name())
+		return "", fmt.Errorf("failed to write token to temp file: %w", err)
+	}
+
+	return tokenFile.Name(), nil
 }

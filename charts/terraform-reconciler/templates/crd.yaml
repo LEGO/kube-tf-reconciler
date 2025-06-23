@@ -95,6 +95,8 @@ spec:
                 type: array
               terraformVersion:
                 type: string
+              terraformRC:
+                type: string
               tf:
                 properties:
                   env:
