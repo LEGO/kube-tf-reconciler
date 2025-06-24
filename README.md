@@ -33,6 +33,11 @@ This project includes the following dependencies that are licensed under the Moz
 - [https://github.com/hashicorp/hcl/v2](https://github.com/hashicorp/hcl/v2)
 - [https://github.com/hashicorp/terraform-exec](https://github.com/hashicorp/terraform-exec)
 
+#### MPL Modifications
+
+If you modify any of the MPL licensed dependencies, you must relases those modifications under the MPL license .
+The full text of the MPL licenses are stipulated in the repositories of the dependencies as listed above.
+
 ## Contributions
 
 We welcome contributions to the Kube TF Reconciler, please read the [contribution guidelines](./CONTRIBUTING.md) for more information on how to contribute.
