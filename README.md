@@ -28,10 +28,10 @@ This project is licensed under Apache License 2.0. See the [LICENSE](LICENSE)
 
 This project includes the following dependencies that are licensed under the Mozilla Public License (MPL):
 
-- [github.com/hashicorp/go-version](github.com/hashicorp/go-version)
-- [github.com/hashicorp/hc-install](github.com/hashicorp/hc-install)
-- [github.com/hashicorp/hcl/v2](github.com/hashicorp/hcl/v2)
-- [github.com/hashicorp/terraform-exec](github.com/hashicorp/terraform-exec)
+- [https://github.com/hashicorp/go-version](https://github.com/hashicorp/go-version)
+- [https://github.com/hashicorp/hc-install](https://github.com/hashicorp/hc-install)
+- [https://github.com/hashicorp/hcl/v2](https://github.com/hashicorp/hcl/v2)
+- [https://github.com/hashicorp/terraform-exec](https://github.com/hashicorp/terraform-exec)
 
 ## Contributions
 
