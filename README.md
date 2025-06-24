@@ -30,13 +30,13 @@ This project includes the following dependencies that are licensed under the Moz
 
 - [https://github.com/hashicorp/go-version](https://github.com/hashicorp/go-version)
 - [https://github.com/hashicorp/hc-install](https://github.com/hashicorp/hc-install)
-- [https://github.com/hashicorp/hcl/v2](https://github.com/hashicorp/hcl/v2)
+- [https://github.com/hashicorp/hcl](https://github.com/hashicorp/hcl/v2)
 - [https://github.com/hashicorp/terraform-exec](https://github.com/hashicorp/terraform-exec)
 
 #### MPL Modifications
 
-If you modify any of the MPL licensed dependencies, you must relases those modifications under the MPL license .
-The full text of the MPL licenses are stipulated in the repositories of the dependencies as listed above.
+If you modify any of the MPL licensed dependencies, you must relases those modifications under the MPL license, in a separate repository.
+The full text of the MPL licenses can be found in the [LICENSES folder](LICENSES). Its recommended to look at the licenses stipulated in the repositories of the dependencies as listed above to make sure they are up to date.
 
 ## Contributions
 
