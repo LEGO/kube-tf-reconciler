@@ -20,6 +20,19 @@ Running tests
 go test ./... -v
 ```
 
+## License
+
+This project is licensed under Apache License 2.0. See the [LICENSE](LICENSE)
+
+### MPL Dependencies
+
+This project includes the following dependencies that are licensed under the Mozilla Public License (MPL):
+
+- [github.com/hashicorp/go-version](github.com/hashicorp/go-version)
+- [github.com/hashicorp/hc-install](github.com/hashicorp/hc-install)
+- [github.com/hashicorp/hcl/v2](github.com/hashicorp/hcl/v2)
+- [github.com/hashicorp/terraform-exec](github.com/hashicorp/terraform-exec)
+
 ## Contributions
 
 We welcome contributions to the Kube TF Reconciler, please read the [contribution guidelines](./CONTRIBUTING.md) for more information on how to contribute.
