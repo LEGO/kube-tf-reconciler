@@ -1,4 +1,3 @@
-<<<<<<< debug-config
 # Kube Terraform Reconciler
 
 Kube Terraform Reconciler (krec) is a Kubernetes operator for managing infrastructure as code using Terraform. It allows you to define Terraform workspaces as Kubernetes custom resources and automatically reconciles your infrastructure based on these resources.
