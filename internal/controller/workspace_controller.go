@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
 	"lukaspj.io/kube-tf-reconciler/pkg/render"
 	"lukaspj.io/kube-tf-reconciler/pkg/runner"
@@ -73,7 +74,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	// Clean up temporary token file at the end of reconciliation
+	// Clean up temporary AWS token file at the end of reconciliation
 	if tempTokenPath, exists := envs["AWS_WEB_IDENTITY_TOKEN_FILE"]; exists {
 		defer func() {
 			if err := os.Remove(tempTokenPath); err != nil {
@@ -91,6 +92,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	envs["HOME"] = os.Getenv("HOME")
 	envs["PATH"] = os.Getenv("PATH")
+	envs["TF_PLUGIN_CACHE_DIR"] = r.Tf.PluginCacheDir
+	envs["TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE"] = "true"
 
 	if terraformRCPath != "" {
 		envs["TF_CLI_CONFIG_FILE"] = terraformRCPath
@@ -108,13 +111,18 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("failed to render workspace %s: %w", req.String(), err)
 	}
 
-	ws.Status.CurrentRender = string(result)
-	err = r.Client.Status().Update(ctx, &ws)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+			return err
+		}
+		ws.Status.CurrentRender = string(result)
+		return r.Client.Status().Update(ctx, &ws)
+	})
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
 	}
 
-	err = tf.Init(ctx, tfexec.Upgrade(true))
+	err = r.Tf.TerraformInit(ctx, tf)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to init workspace: %w", err)
 	}
@@ -123,27 +131,49 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to validate workspace: %w", err)
 	}
-	ws.Status.ValidRender = valResult.Valid
-	err = r.Client.Status().Update(ctx, &ws)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+			return err
+		}
+		ws.Status.ValidRender = valResult.Valid
+		return r.Client.Status().Update(ctx, &ws)
+	})
+
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
 	}
 
 	if !ws.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&ws, workspaceFinalizer) {
-			err = tf.Destroy(ctx)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to destroy resource: %w", err)
-			}
+			// Only run destroy if PreventDestroy is false
+			if !ws.Spec.PreventDestroy {
+				err = tf.Destroy(ctx)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("failed to destroy resource: %w", err)
+				}
 
-			r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFDestroyEventReason, "Successfully destroyed resources")
+				r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFDestroyEventReason, "Successfully destroyed resources")
+			} else {
+				log.Info("skipping terraform destroy due to the preventDestroy flag")
+				r.Recorder.Eventf(&ws, v1.EventTypeNormal, "DestroyPrevented",
+					"Terraform destroy skipped due to preventDestroy")
+			}
+			log.Info("deleted workspace")
 
 			controllerutil.RemoveFinalizer(&ws, workspaceFinalizer)
 			if err := r.Update(ctx, &ws); err != nil {
 				return ctrl.Result{}, err
 			}
 			ws.Status.ObservedGeneration = ws.Generation
-			return ctrl.Result{}, r.Client.Status().Update(ctx, &ws)
+			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+					return err
+				}
+				ws.Status.ValidRender = valResult.Valid
+				return r.Client.Status().Update(ctx, &ws)
+			})
+
+			return ctrl.Result{}, err
 
 		}
 		// Stop reconciliation as resource is being deleted
@@ -169,8 +199,14 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("failed to show plan file: %w", err)
 	}
 	r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFPlanEventReason, "Workspace %s planned", req.String())
-	ws.Status.LatestPlan = plan
-	err = r.Client.Status().Update(ctx, &ws)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+			return err
+		}
+		ws.Status.LatestPlan = plan
+		return r.Client.Status().Update(ctx, &ws)
+	})
+
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
 	}
@@ -187,8 +223,16 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFApplyEventReason, "Workspace %s applied", req.String())
 	}
 
-	ws.Status.ObservedGeneration = ws.Generation
-	return ctrl.Result{}, r.Client.Status().Update(ctx, &ws)
+	log.WithValues("changed", changed).Info("applied workspace")
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+			return err
+		}
+		ws.Status.ObservedGeneration = ws.Generation
+		return r.Client.Status().Update(ctx, &ws)
+	})
+	return ctrl.Result{}, err
 }
 
 func (r *WorkspaceReconciler) renderHcl(workspaceDir string, ws tfreconcilev1alpha1.Workspace) ([]byte, error) {
@@ -286,7 +330,7 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws tfreco
 	// Handle AWS authentication with service account tokens
 	if ws.Spec.Authentication != nil {
 		if ws.Spec.Authentication.AWS != nil {
-			if ws.Spec.Authentication.AWS.ServiceAccountName == "" || ws.Spec.Authentication.AWS.RoleARN == "" {
+			if ws.Spec.Authentication.AWS.ServiceAccountName != "" || ws.Spec.Authentication.AWS.RoleARN != "" {
 				tempTokenPath, err := r.setupAWSAuthentication(ctx, ws)
 				if err != nil {
 					return nil, fmt.Errorf("failed to setup AWS authentication: %w", err)
