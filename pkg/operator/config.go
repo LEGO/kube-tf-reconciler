@@ -15,7 +15,7 @@ func DefaultConfig() Config {
 	return Config{
 		Port:                 ":8080",
 		ProbeAddr:            ":8081",
-		LeaderElectionID:     "69943c0d.krec-operator.lukasjp",
+		LeaderElectionID:     "69943c0d.krec-operator.lego.com",
 		Namespace:            "krec",
 		EnableLeaderElection: false,
 		WorkspacePath:        "./.testdata",

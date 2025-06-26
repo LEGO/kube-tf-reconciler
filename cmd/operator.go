@@ -48,7 +48,7 @@ var operatorCmd = &cobra.Command{
 			HealthProbeBindAddress:  cfg.ProbeAddr,
 			LeaderElectionNamespace: cfg.Namespace,
 			LeaderElection:          cfg.EnableLeaderElection,
-			LeaderElectionID:        "69943c0d.krec-operator.lukasjp",
+			LeaderElectionID:        "69943c0d.krec-operator.lego.com",
 		})
 		if err != nil {
 			slog.Error("unable to start manager", "error", err)
