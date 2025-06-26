@@ -145,12 +145,19 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if !ws.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&ws, workspaceFinalizer) {
-			err = tf.Destroy(ctx)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to destroy resource: %w", err)
-			}
+			// Only run destroy if PreventDestroy is false
+			if !ws.Spec.PreventDestroy {
+				err = tf.Destroy(ctx)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("failed to destroy resource: %w", err)
+				}
 
-			r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFDestroyEventReason, "Successfully destroyed resources")
+				r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFDestroyEventReason, "Successfully destroyed resources")
+			} else {
+				log.Info("skipping terraform destroy due to the preventDestroy flag")
+				r.Recorder.Eventf(&ws, v1.EventTypeNormal, "DestroyPrevented",
+					"Terraform destroy skipped due to preventDestroy")
+			}
 			log.Info("deleted workspace")
 
 			controllerutil.RemoveFinalizer(&ws, workspaceFinalizer)
