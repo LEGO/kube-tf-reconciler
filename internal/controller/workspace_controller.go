@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"time"
 
+	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
+	"github.com/LEGO/kube-tf-reconciler/pkg/render"
+	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/hashicorp/terraform-exec/tfexec"
 	authv1 "k8s.io/api/authentication/v1"
@@ -17,9 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
-	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
-	"lukaspj.io/kube-tf-reconciler/pkg/render"
-	"lukaspj.io/kube-tf-reconciler/pkg/runner"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -34,7 +34,7 @@ const (
 	TFDestroyEventReason = "TerraformDestroy"
 
 	// Finalizer name
-	workspaceFinalizer = "tf-reconcile.lukaspj.io/finalizer"
+	workspaceFinalizer = "tf-reconcile.lego.com/finalizer"
 )
 
 // WorkspaceReconciler reconciles a Workspace object

@@ -4,14 +4,14 @@ import (
 	"log/slog"
 	"os"
 
+	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
+	"github.com/LEGO/kube-tf-reconciler/internal/controller"
+	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
-	"lukaspj.io/kube-tf-reconciler/internal/controller"
-	"lukaspj.io/kube-tf-reconciler/pkg/runner"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
@@ -48,7 +48,7 @@ var operatorCmd = &cobra.Command{
 			HealthProbeBindAddress:  cfg.ProbeAddr,
 			LeaderElectionNamespace: cfg.Namespace,
 			LeaderElection:          cfg.EnableLeaderElection,
-			LeaderElectionID:        "69943c0d.krec-operator.lukasjp",
+			LeaderElectionID:        "69943c0d.krec-operator.lego.com",
 		})
 		if err != nil {
 			slog.Error("unable to start manager", "error", err)

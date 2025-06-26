@@ -3,11 +3,11 @@ kind: ClusterRole
 metadata:
   name: {{ .Values.appName }}
 rules:
-  - apiGroups: ["tf-reconcile.lukaspj.io"]
+  - apiGroups: ["tf-reconcile.lego.com"]
     resources: ["workspaces"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   
-  - apiGroups: ["tf-reconcile.lukaspj.io"]
+  - apiGroups: ["tf-reconcile.lego.com"]
     resources: ["workspaces/status"]
     verbs: ["get", "update", "patch"]
     

@@ -17,7 +17,7 @@ Features
 Create a Workspace resource:
 
 ```yaml
-apiVersion: tf-reconcile.lukaspj.io/v1alpha1
+apiVersion: tf-reconcile.lego.com/v1alpha1
 kind: Workspace
 metadata:
   name: workspace1

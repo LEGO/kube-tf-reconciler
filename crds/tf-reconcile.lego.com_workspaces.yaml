@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.2
-  name: workspaces.tf-reconcile.lukaspj.io
+  name: workspaces.tf-reconcile.lego.com
 spec:
-  group: tf-reconcile.lukaspj.io
+  group: tf-reconcile.lego.com
   names:
     kind: Workspace
     listKind: WorkspaceList

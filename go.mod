@@ -1,4 +1,4 @@
-module lukaspj.io/kube-tf-reconciler
+module github.com/LEGO/kube-tf-reconciler
 
 go 1.24.1
 

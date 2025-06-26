@@ -1,6 +1,6 @@
 // Package v1alpha1 contains API Schema definitions for the tf-reconcile v1alpha1 API group.
 // +kubebuilder:object:generate=true
-// +groupName=tf-reconcile.lukaspj.io
+// +groupName=tf-reconcile.lego.com
 package v1alpha1
 
 import (
@@ -10,7 +10,7 @@ import (
 
 var (
 	// GroupVersion is group version used to register these objects.
-	GroupVersion = schema.GroupVersion{Group: "tf-reconcile.lukaspj.io", Version: "v1alpha1"}
+	GroupVersion = schema.GroupVersion{Group: "tf-reconcile.lego.com", Version: "v1alpha1"}
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
 	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
