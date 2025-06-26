@@ -4,7 +4,6 @@ RUN apk update && apk upgrade && apk add --no-cache ca-certificates
 RUN update-ca-certificates
 
 ARG SHA
-ARG VERSION
 ARG DATE
 
 COPY . /src

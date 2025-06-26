@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-version"
@@ -15,9 +16,14 @@ import (
 )
 
 type Exec struct {
-	RootDir       string
-	installDir    string
-	WorkspacesDir string
+	RootDir        string
+	installDir     string
+	WorkspacesDir  string
+	PluginCacheDir string
+
+	terraformInstalledVersions map[string]string
+	terraformInstallMutex      sync.RWMutex
+	providerInitMutex          sync.Mutex
 }
 
 func New(rootDir string) *Exec {
@@ -42,11 +48,18 @@ func New(rootDir string) *Exec {
 	if err != nil {
 		panic(err)
 	}
+	pluginCacheDir := filepath.Join(rootDir, "plugin-cache")
+	err = os.MkdirAll(pluginCacheDir, 0755)
+	if err != nil {
+		panic(err)
+	}
 
 	return &Exec{
-		RootDir:       rootDir,
-		installDir:    installDir,
-		WorkspacesDir: workspacesDir,
+		RootDir:                    rootDir,
+		installDir:                 installDir,
+		WorkspacesDir:              workspacesDir,
+		PluginCacheDir:             pluginCacheDir,
+		terraformInstalledVersions: make(map[string]string),
 	}
 }
 
@@ -77,6 +90,41 @@ func (e *Exec) SetupTerraformRC(workspacePath string, terraformRCContent string)
 	return terraformRCPath, nil
 }
 
+func (e *Exec) TerraformInit(ctx context.Context, tf *tfexec.Terraform, opts ...tfexec.InitOption) error {
+	e.providerInitMutex.Lock()
+	defer e.providerInitMutex.Unlock()
+	err := tf.Init(ctx, opts...)
+	return err
+}
+func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) (string, error) {
+	e.terraformInstallMutex.Lock()
+	defer e.terraformInstallMutex.Unlock()
+	if execPath, exists := e.terraformInstalledVersions[terraformVersion]; exists {
+		// Verify the binary still exists
+		if _, err := os.Stat(execPath); err == nil {
+			return execPath, nil
+		}
+		// If it doesn't exist or was deleted, remove from cache
+		delete(e.terraformInstalledVersions, terraformVersion)
+	}
+
+	// Not installed or missing — do the install
+	installer := &releases.ExactVersion{
+		Product:    product.Terraform,
+		InstallDir: e.installDir,
+		Version:    version.Must(version.NewVersion(terraformVersion)),
+	}
+	installer.Timeout = 2 * time.Minute
+
+	execPath, err := installer.Install(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to install terraform: %w", err)
+	}
+
+	e.terraformInstalledVersions[terraformVersion] = execPath
+	return execPath, nil
+}
+
 func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (*tfexec.Terraform, string, error) {
 	path, err := e.SetupWorkspace(filepath.Join(ws.Namespace, ws.Name))
 	if err != nil {
@@ -91,19 +139,11 @@ func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws tfreconcilev1alp
 		}
 	}
 
-	installer := &releases.ExactVersion{
-		Product:    product.Terraform,
-		InstallDir: e.installDir,
-		Version:    version.Must(version.NewVersion(ws.Spec.TerraformVersion)),
-	}
-
-	//custom timeout because Openshift is slow
-	installer.Timeout = 2 * time.Minute
-
-	execPath, err := installer.Install(ctx)
+	execPath, err := e.getTerraformBinary(ctx, ws.Spec.TerraformVersion)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to install terraform: %w", err)
+		return nil, "", err
 	}
+
 	tf, err := tfexec.NewTerraform(path, execPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create terraform instance: %w", err)
