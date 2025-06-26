@@ -3,10 +3,10 @@ package render
 import (
 	"testing"
 
+	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
+	"github.com/LEGO/kube-tf-reconciler/internal/testutils"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/stretchr/testify/assert"
-	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
-	"lukaspj.io/kube-tf-reconciler/internal/testutils"
 )
 
 func TestRenderWorkspace_Success(t *testing.T) {

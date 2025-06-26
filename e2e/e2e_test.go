@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LEGO/kube-tf-reconciler/internal/testutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"lukaspj.io/kube-tf-reconciler/internal/testutils"
 	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/support/kind"
@@ -18,7 +18,7 @@ import (
 
 func TestE2E(t *testing.T) {
 	kindClusterName := "krec-cluster" //envconf.RandomName("my-cluster", 16)
-	operatorImage := "lukaspj/kube-tf-reconciler:latest"
+	operatorImage := "lego/kube-tf-reconciler:latest"
 	operatorName := envconf.RandomName("krec", 16)
 	operatorNs := "krec"
 

@@ -2,7 +2,7 @@ appName: "terraform-reconciler"
 namespace: "terraform-reconciler"
 
 image:
-  repository: ghcr.io/lukaspj/kube-tf-reconciler/kube-tf-reconciler
+  repository: ghcr.io/lego/kube-tf-reconciler/kube-tf-reconciler
   tag: sha-d549f8b
   pullPolicy: IfNotPresent
 

@@ -11,7 +11,7 @@ var (
 	version = "development"
 	commit  = "none"
 	date    = "some time ago"
-	home    = "https://github.com/lukaspj/kube-tf-reconciler"
+	home    = "https://github.com/LEGO/kube-tf-reconciler"
 )
 
 // versionCmd represents the version command.

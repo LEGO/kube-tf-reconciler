@@ -1,6 +1,6 @@
 package main
 
-import "lukaspj.io/kube-tf-reconciler/cmd"
+import "github.com/LEGO/kube-tf-reconciler/cmd"
 
 // Generate CRDs
 //go:generate go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 rbac:roleName=manager-role crd:maxDescLen=0 object paths="./api/..." output:crd:dir=crds

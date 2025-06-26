@@ -3,8 +3,8 @@ package render
 import (
 	"fmt"
 
+	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
 	"github.com/hashicorp/hcl/v2/hclwrite"
-	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
 )
 
 func Providers(body *hclwrite.Body, providers []tfreconcilev1alpha1.ProviderSpec) error {

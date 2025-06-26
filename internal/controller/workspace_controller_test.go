@@ -5,14 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 
+	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
+	"github.com/LEGO/kube-tf-reconciler/internal/testutils"
 	"github.com/stretchr/testify/assert"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
-	tfreconcilev1alpha1 "lukaspj.io/kube-tf-reconciler/api/v1alpha1"
-	"lukaspj.io/kube-tf-reconciler/internal/testutils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
