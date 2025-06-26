@@ -1,5 +1,7 @@
 # Kube Terraform Reconciler
 
+**NOTE**: This project is currently developed for internal use, but may later be developed for broader consumption
+
 Kube Terraform Reconciler (krec) is a Kubernetes operator for managing infrastructure as code using Terraform. It allows you to define Terraform workspaces as Kubernetes custom resources and automatically reconciles your infrastructure based on these resources.
 
 Features
@@ -9,7 +11,6 @@ Features
 - Terraform backend configuration
 - Auto-apply functionality
 - State tracking through Kubernetes status
-
 
 ## Usage
 
@@ -54,6 +55,19 @@ spec:
       allowed_services: ["rds", "dynamo"]
 ```
 
+## Contributors Guide
+
+Ensure CRDs are updated by running the following command:
+
+```bash
+go generate ./...
+```
+
+Running tests
+
+```bash
+go test ./... -v
+```
 
 ## Debugging in a live cluster
 
@@ -94,28 +108,6 @@ kubectl port-forward -n krec-debug svc/krec-debug 2345:2345
 - For VS Code: Configure launch.json to connect to localhost:2345
 - For GoLand: Set up a Go Remote configuration targeting localhost:2345
 - For Delve CLI: dlv connect localhost:2345
-=======
-# Kube TF Reconciler
-
-**NOTE**: This project is currently developed for internal use, but may later be developed for broader consumption
-
-The Kube TF Reconciler is a kubernetes operator that uses a regular terraform module as input and reconciles all the
-resources defined in the module. It's designed to be multitenant meaning that terraform operations will be executed
-in isolation from each other, so you can run multiple reconciliations in parallel without worrying about leaking credentials, state etc.
-
-## Getting started
-
-Updating CRD's by running the following command:
-
-```bash
-go generate ./...
-```
-
-Running tests
-
-```bash
-go test ./... -v
-```
 
 ## License
 
@@ -141,4 +133,3 @@ We welcome contributions to the Kube TF Reconciler, please read the [contributio
 
 As this project is in the early stages of development, we are still working on the contribution guidelines and best practices.
 We appreciate your patience and understanding as we work to improve the project.
->>>>>>> main
