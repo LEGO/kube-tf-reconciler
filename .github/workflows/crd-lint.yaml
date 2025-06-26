@@ -1,0 +1,39 @@
+name: Lint CRD
+
+on:
+  pull_request:
+    paths:
+      - "crds/**"
+    branches:
+      - main
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: '1'
+          path: new
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: '1'
+          ref: main
+          path: old
+      - name: Download crdiff
+        run: |
+          curl -L -o crdiff.tgz https://github.com/xrstf/crdiff/releases/download/v0.0.2/crdiff_0.0.2_linux_amd64.tar.gz
+          tar -xf crdiff.tgz
+          mv crdiff_0.0.2_linux_amd64/crdiff crdiff
+          echo "----"
+          echo "Running crdiff..."
+          echo ""
+          echo ""
+          ./crdiff breaking old/crds/ new/crds/ > report 2>&1
+          cat report
+          echo ""
+          echo ""
+          grep "No changes detected." report > /dev/null
+          exit $?
+          
