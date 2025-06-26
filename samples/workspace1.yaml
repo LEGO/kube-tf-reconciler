@@ -1,0 +1,36 @@
+apiVersion: tf-reconcile.lukaspj.io/v1alpha1
+kind: Workspace
+metadata:
+  name: workspace1
+spec:
+  terraformVersion: 1.11.2
+  tf:
+    env:
+      - name: AWS_REGION
+        value: eu-west-1
+      - name: AWS_ACCESS_KEY_ID
+        secretKeyRef:
+          name: aws-access-key
+          key: access-key-id
+      - name: AWS_SECRET_ACCESS_KEY
+        secretKeyRef:
+          name: aws-access-key
+          key: secret-access-key
+      - name: AWS_SESSION_TOKEN
+        secretKeyRef:
+          name: aws-access-key
+          key: session-token
+  backend:
+    type: local
+  providerSpecs:
+    - name: aws
+      source: hashicorp/aws
+      version: 5.94.1
+  module:
+    name: my-module
+    source: terraform-aws-modules/iam/aws//modules/iam-read-only-policy
+    inputs:
+      name: "awesome-role-krec-testing"
+      path: "/"
+      description: "My example read-only policy"
+      allowed_services: ["rds", "dynamo"]

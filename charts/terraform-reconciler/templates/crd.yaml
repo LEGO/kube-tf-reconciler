@@ -1,0 +1,167 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: workspaces.tf-reconcile.lukaspj.io
+spec:
+  group: tf-reconcile.lukaspj.io
+  names:
+    kind: Workspace
+    listKind: WorkspaceList
+    plural: workspaces
+    shortNames:
+    - tfws
+    - ws
+    singular: workspace
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              autoApply:
+                default: false
+                type: boolean
+              backend:
+                properties:
+                  inputs:
+                    x-kubernetes-preserve-unknown-fields: true
+                  type:
+                    enum:
+                    - local
+                    - remote
+                    - s3
+                    - gcs
+                    - azurerm
+                    - oss
+                    - consul
+                    - cos
+                    - http
+                    - pg
+                    - kubernetes
+                    type: string
+                required:
+                - type
+                type: object
+              module:
+                properties:
+                  inputs:
+                    x-kubernetes-preserve-unknown-fields: true
+                  name:
+                    type: string
+                  outputs:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        value:
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    type: array
+                  source:
+                    type: string
+                  version:
+                    type: string
+                required:
+                - name
+                - source
+                type: object
+              providerSpecs:
+                items:
+                  properties:
+                    name:
+                      type: string
+                    source:
+                      type: string
+                    version:
+                      type: string
+                  required:
+                  - name
+                  - source
+                  type: object
+                type: array
+              terraformVersion:
+                type: string
+              terraformRC:
+                type: string
+              tf:
+                properties:
+                  env:
+                    items:
+                      properties:
+                        configMapKeyRef:
+                          properties:
+                            key:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                        name:
+                          type: string
+                        secretKeyRef:
+                          properties:
+                            key:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                        value:
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                required:
+                - env
+                type: object
+            required:
+            - autoApply
+            - backend
+            - module
+            - providerSpecs
+            - terraformVersion
+            type: object
+          status:
+            properties:
+              currentRender:
+                type: string
+              latestPlan:
+                type: string
+              nextRefreshTimestamp:
+                format: date-time
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              validRender:
+                type: boolean
+            required:
+            - currentRender
+            - latestPlan
+            - observedGeneration
+            - validRender
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
