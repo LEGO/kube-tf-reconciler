@@ -68,6 +68,10 @@ type PlanStatus struct {
 	// +kubebuilder:validation:Optional
 	PlanOutput string `json:"planOutput,omitempty"`
 
+	// ApplyOutput contains the raw terraform apply output
+	// +kubebuilder:validation:Optional
+	ApplyOutput string `json:"applyOutput,omitempty"`
+
 	// HasChanges indicates whether this plan contains changes to apply
 	// +kubebuilder:validation:Optional
 	HasChanges bool `json:"hasChanges"`

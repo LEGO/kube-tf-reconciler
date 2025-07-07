@@ -96,6 +96,9 @@ spec:
           status:
             description: PlanStatus defines the observed state of Plan
             properties:
+              applyOutput:
+                description: ApplyOutput contains the raw terraform apply output
+                type: string
               completionTime:
                 description: CompletionTime is the time the plan execution completed
                 format: date-time
@@ -115,14 +118,6 @@ spec:
                 type: integer
               phase:
                 description: Phase represents the current phase of the Plan
-                enum:
-                - Pending
-                - Planning
-                - Planned
-                - Applying
-                - Applied
-                - Errored
-                - Cancelled
                 type: string
               planOutput:
                 description: PlanOutput contains the raw terraform plan output

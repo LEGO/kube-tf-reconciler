@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -109,6 +110,7 @@ func (r *PlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			}
 			plan.Status.StartTime = &now
 			plan.Status.Phase = tfreconcilev1alpha1.PlanPhasePlanning
+			plan.Status.ObservedGeneration = plan.Generation
 			return r.Client.Status().Update(ctx, &plan)
 		})
 		if err != nil {
@@ -260,13 +262,16 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 			log.Info("plan has no changes, marking as applied", "plan", plan.Name)
 			now := metav1.NewTime(time.Now())
 			return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseApplied, "Plan completed - no changes needed", &planStatusUpdate{
+				hasChanges:     false,
+				validRender:    true,
+				planOutput:     planOutput,
 				completionTime: &now,
 			})
 		}
 
 		if changed || plan.Spec.Destroy {
 			if !plan.Spec.Destroy {
-				canApply, err := r.canPlanAutoApply(ctx, plan)
+				canApply, err := r.canPlanRun(ctx, plan)
 				if err != nil {
 					return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 						fmt.Sprintf("Failed to check plan eligibility: %v", err), nil)
@@ -280,7 +285,7 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 
 			// For destroy plans, proceed even if changed is false -
 			// this could mean there's nothing to destroy, which is a successful outcome
-			err = r.executeTerraformApply(ctx, tf, plan)
+			applyOutput, err := r.executeTerraformApply(ctx, tf, plan)
 			if err != nil {
 				return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 					fmt.Sprintf("Failed to apply terraform: %v", err), nil)
@@ -291,16 +296,19 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 			// Update plan status to applied
 			now := metav1.NewTime(time.Now())
 			return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseApplied, "Apply completed successfully", &planStatusUpdate{
+				hasChanges:     changed,
+				validRender:    true,
+				planOutput:     planOutput,
+				applyOutput:    applyOutput,
 				completionTime: &now,
 			})
 		}
 	}
 
-	// Plan completed but no auto-apply - update status to Planned
-	validRender := true // already validated above
+	// Plan completed but no auto-apply - update status to Planned with plan output
 	return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhasePlanned, "Plan completed successfully", &planStatusUpdate{
 		hasChanges:  changed,
-		validRender: validRender,
+		validRender: true,
 		planOutput:  planOutput,
 	})
 }
@@ -332,12 +340,49 @@ func (r *PlanReconciler) executeTerraformPlan(ctx context.Context, tf *tfexec.Te
 }
 
 // executeTerraformApply executes the terraform apply command
-func (r *PlanReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.Terraform, plan *tfreconcilev1alpha1.Plan) error {
+func (r *PlanReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.Terraform, plan *tfreconcilev1alpha1.Plan) (string, error) {
+	// Create buffers to capture stdout and stderr
+	var stdout, stderr bytes.Buffer
+	tf.SetStdout(&stdout)
+	tf.SetStderr(&stderr)
+
+	var err error
 	if plan.Spec.Destroy {
-		return tf.Destroy(ctx)
+		err = tf.Destroy(ctx)
 	} else {
-		return tf.Apply(ctx)
+		err = tf.Apply(ctx)
 	}
+
+	// Build comprehensive output
+	output := ""
+
+	// Add stdout content
+	if stdout.Len() > 0 {
+		output += "=== TERRAFORM OUTPUT ===\n"
+		output += stdout.String()
+	}
+
+	// Add stderr content (warnings, errors, diagnostics)
+	if stderr.Len() > 0 {
+		if output != "" {
+			output += "\n"
+		}
+		output += "=== TERRAFORM DIAGNOSTICS ===\n"
+		output += stderr.String()
+	}
+
+	// If there was an error, add error details
+	if err != nil && output != "" {
+		output += "\n=== ERROR DETAILS ===\n"
+		output += fmt.Sprintf("Exit error: %v", err)
+	}
+
+	// If no output was captured but there was an error, at least show the error
+	if output == "" && err != nil {
+		output = fmt.Sprintf("Terraform command failed: %v", err)
+	}
+
+	return output, err
 }
 
 func (r *PlanReconciler) handleDeletion(ctx context.Context, plan *tfreconcilev1alpha1.Plan) (ctrl.Result, error) {
@@ -358,6 +403,7 @@ type planStatusUpdate struct {
 	hasChanges     bool
 	validRender    bool
 	planOutput     string
+	applyOutput    string
 	completionTime *metav1.Time
 }
 
@@ -379,6 +425,9 @@ func (r *PlanReconciler) updatePlanStatus(ctx context.Context, plan *tfreconcile
 			plan.Status.ValidRender = update.validRender
 			if update.planOutput != "" {
 				plan.Status.PlanOutput = update.planOutput
+			}
+			if update.applyOutput != "" {
+				plan.Status.ApplyOutput = update.applyOutput
 			}
 		}
 
@@ -544,15 +593,6 @@ func (r *PlanReconciler) canPlanRun(ctx context.Context, plan *tfreconcilev1alph
 	}
 
 	return true, nil
-}
-
-// canPlanAutoApply checks if this plan is eligible for auto-apply.
-// Since canPlanRun already handles mutual exclusion between regular and destroy plans,
-// we just need to check if this plan can run at all.
-func (r *PlanReconciler) canPlanAutoApply(ctx context.Context, plan *tfreconcilev1alpha1.Plan) (bool, error) {
-	// The mutual exclusion logic is already handled in canPlanRun
-	// If a plan can run, it can also auto-apply (assuming it has AutoApply=true, which is checked by the caller)
-	return r.canPlanRun(ctx, plan)
 }
 
 // SetupWithManager sets up the controller with the Manager.
