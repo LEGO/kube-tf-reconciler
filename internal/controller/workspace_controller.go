@@ -403,7 +403,6 @@ func (r *WorkspaceReconciler) cancelOlderPlans(ctx context.Context, ws tfreconci
 
 		// Cancel the plan if it's running or errored
 		if plan.Status.Phase == tfreconcilev1alpha1.PlanPhasePlanning ||
-			plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseApplying ||
 			plan.Status.Phase == tfreconcilev1alpha1.PlanPhasePlanned ||
 			plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseErrored {
 

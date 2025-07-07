@@ -8,14 +8,10 @@ import (
 type PlanPhase string
 
 const (
-	// PlanPhasePending indicates the plan is waiting to be executed
-	PlanPhasePending PlanPhase = "Pending"
 	// PlanPhasePlanning indicates the plan is currently being generated
 	PlanPhasePlanning PlanPhase = "Planning"
 	// PlanPhasePlanned indicates the plan has been successfully generated
 	PlanPhasePlanned PlanPhase = "Planned"
-	// PlanPhaseApplying indicates the plan is currently being applied
-	PlanPhaseApplying PlanPhase = "Applying"
 	// PlanPhaseApplied indicates the plan has been successfully applied
 	PlanPhaseApplied PlanPhase = "Applied"
 	// PlanPhaseErrored indicates the plan encountered an error

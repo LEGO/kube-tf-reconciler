@@ -34,7 +34,6 @@ const (
 	planFinalizer = "tf-reconcile.lego.com/plan-finalizer"
 )
 
-// PlanReconciler reconciles a Plan object
 type PlanReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
@@ -94,7 +93,6 @@ func (r *PlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			fmt.Sprintf("Failed to get workspace: %v", err), nil)
 	}
 
-	// Add finalizer if not present
 	if !controllerutil.ContainsFinalizer(&plan, planFinalizer) {
 		controllerutil.AddFinalizer(&plan, planFinalizer)
 		if err := r.Update(ctx, &plan); err != nil {
@@ -103,7 +101,6 @@ func (r *PlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Set start time if not set
 	if plan.Status.StartTime == nil {
 		now := metav1.NewTime(time.Now())
 		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -117,12 +114,12 @@ func (r *PlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		if err != nil {
 			return ctrl.Result{Requeue: true}, fmt.Errorf("failed to update plan start time: %w", err)
 		}
-		// Continue execution instead of returning
+
 		plan.Status.Phase = tfreconcilev1alpha1.PlanPhasePlanning
 	}
 
 	switch plan.Status.Phase {
-	case "", tfreconcilev1alpha1.PlanPhasePending:
+	case "", tfreconcilev1alpha1.PlanPhasePlanning:
 		// Check if this plan is still eligible to run before starting
 		if !plan.Spec.Destroy {
 			canRun, err := r.canPlanRun(ctx, &plan)
@@ -137,92 +134,17 @@ func (r *PlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			}
 		}
 
-		// Start planning phase
-		result, err := r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhasePlanning, "Starting terraform plan", nil)
-		if err != nil {
-			return result, err
-		}
-		// Continue to execute plan immediately
-		return r.executePlan(ctx, &plan, *workspace)
+		return r.executePlanWorkflow(ctx, &plan, *workspace)
 
-	case tfreconcilev1alpha1.PlanPhasePlanning:
-		// Check if this plan is still eligible to run before continuing
-		if !plan.Spec.Destroy {
-			canRun, err := r.canPlanRun(ctx, &plan)
-			if err != nil {
-				return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseErrored,
-					fmt.Sprintf("Failed to check plan eligibility: %v", err), nil)
-			}
-			if !canRun {
-				log.Info("plan is no longer eligible to run (newer plan exists)", "plan", plan.Name)
-				return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseCancelled,
-					"Plan cancelled during planning - newer plan exists for workspace", nil)
-			}
-		}
-
-		return r.executePlan(ctx, &plan, *workspace)
-
+	// TODO this phase might not be needed anymore, since we handle AutoApply above
 	case tfreconcilev1alpha1.PlanPhasePlanned:
 		if plan.Spec.AutoApply {
-			// If there are no changes and this is not a destroy plan, mark as applied (nothing to do)
-			if !plan.Status.HasChanges && !plan.Spec.Destroy {
-				log.Info("plan has no changes, marking as applied", "plan", plan.Name)
-				now := metav1.NewTime(time.Now())
-				return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseApplied, "Plan completed - no changes needed", &planStatusUpdate{
-					completionTime: &now,
-				})
-			}
-
-			// For plans with changes or destroy plans, proceed with apply
-			if plan.Status.HasChanges || plan.Spec.Destroy {
-				// For destroy plans, proceed even if HasChanges is false -
-				// this could mean there's nothing to destroy, which is a successful outcome
-
-				// Destroy plans should always be allowed to proceed regardless of newer plans
-				if !plan.Spec.Destroy {
-					// Check if this plan is still eligible to auto-apply (only for non-destroy plans)
-					canApply, err := r.canPlanAutoApply(ctx, &plan)
-					if err != nil {
-						return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseErrored,
-							fmt.Sprintf("Failed to check plan eligibility: %v", err), nil)
-					}
-					if !canApply {
-						log.Info("plan is no longer eligible for auto-apply (newer plan exists)", "plan", plan.Name)
-						return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseCancelled,
-							"Plan cancelled - newer plan exists for workspace", nil)
-					}
-				}
-
-				// Start applying phase
-				result, err := r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseApplying, "Starting terraform apply", nil)
-				if err != nil {
-					return result, err
-				}
-				// Continue to execute apply immediately
-				return r.executeApply(ctx, &plan, *workspace)
-			}
+			log.Info("plan is in planned state but has auto-apply enabled, re-executing workflow")
+			return r.executePlanWorkflow(ctx, &plan, *workspace)
 		}
 		return ctrl.Result{}, nil
 
-	case tfreconcilev1alpha1.PlanPhaseApplying:
-		// Double-check that this plan is still eligible before applying (only for non-destroy plans)
-		if plan.Spec.AutoApply && !plan.Spec.Destroy {
-			canApply, err := r.canPlanAutoApply(ctx, &plan)
-			if err != nil {
-				return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseErrored,
-					fmt.Sprintf("Failed to check plan eligibility: %v", err), nil)
-			}
-			if !canApply {
-				log.Info("plan is no longer eligible for auto-apply during apply phase (newer plan exists)", "plan", plan.Name)
-				return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseCancelled,
-					"Plan cancelled during apply - newer plan exists for workspace", nil)
-			}
-		}
-		return r.executeApply(ctx, &plan, *workspace)
-
 	case tfreconcilev1alpha1.PlanPhaseCancelled:
-		// Plan was cancelled, no further action needed
-		// Do not restart cancelled plans even if they have auto-apply enabled
 		log.Info("plan is cancelled, no further action needed", "plan", plan.Name)
 		return ctrl.Result{}, nil
 
@@ -230,15 +152,8 @@ func (r *PlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 
 	case tfreconcilev1alpha1.PlanPhaseErrored:
-		// For errored plans, reset to planning phase to retry
-		// This allows plans to retry when underlying issues (like expired tokens) are fixed
 		log.Info("retrying errored plan", "plan", plan.Name, "previousError", plan.Status.Message)
-		result, err := r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhasePlanning, "Retrying after previous error", nil)
-		if err != nil {
-			return result, err
-		}
-		// Continue to execute plan immediately
-		return r.executePlan(ctx, &plan, *workspace)
+		return r.executePlanWorkflow(ctx, &plan, *workspace)
 
 	default:
 		log.Info("unknown plan phase", "phase", plan.Status.Phase)
@@ -264,24 +179,25 @@ func (r *PlanReconciler) getWorkspace(ctx context.Context, plan tfreconcilev1alp
 	return &workspace, nil
 }
 
-func (r *PlanReconciler) executePlan(ctx context.Context, plan *tfreconcilev1alpha1.Plan, workspace tfreconcilev1alpha1.Workspace) (ctrl.Result, error) {
+// executePlanWorkflow handles the complete plan workflow (plan and potentially apply) in one go
+func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconcilev1alpha1.Plan, workspace tfreconcilev1alpha1.Workspace) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Get environment variables for execution
+	// Set up terraform environment (shared between plan and apply)
 	envs, err := r.getEnvsForExecution(ctx, workspace)
 	if err != nil {
 		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to get envs for execution: %v", err), nil)
 	}
 
-	// Clean up temporary AWS token file at the end
-	if tempTokenPath, exists := envs["AWS_WEB_IDENTITY_TOKEN_FILE"]; exists {
-		defer func() {
+	cleanup := func() {
+		if tempTokenPath, exists := envs["AWS_WEB_IDENTITY_TOKEN_FILE"]; exists {
 			if err := os.Remove(tempTokenPath); err != nil {
 				log.Error(err, "failed to cleanup temp token file", "file", tempTokenPath)
 			}
-		}()
+		}
 	}
+	defer cleanup()
 
 	// Get terraform executable
 	tf, terraformRCPath, err := r.Tf.GetTerraformForWorkspace(ctx, workspace)
@@ -290,7 +206,6 @@ func (r *PlanReconciler) executePlan(ctx context.Context, plan *tfreconcilev1alp
 			fmt.Sprintf("Failed to get terraform executable: %v", err), nil)
 	}
 
-	// Set up environment
 	envs["HOME"] = os.Getenv("HOME")
 	envs["PATH"] = os.Getenv("PATH")
 	envs["TF_PLUGIN_CACHE_DIR"] = r.Tf.PluginCacheDir
@@ -306,22 +221,18 @@ func (r *PlanReconciler) executePlan(ctx context.Context, plan *tfreconcilev1alp
 			fmt.Sprintf("Failed to set terraform env: %v", err), nil)
 	}
 
-	// Write the HCL content to main.tf first, before terraform init
-	// For destroy plans, we still need the original HCL content for proper state management
 	err = r.writeHclContent(tf.WorkingDir(), plan.Spec.Render)
 	if err != nil {
 		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to write HCL content: %v", err), nil)
 	}
 
-	// Initialize terraform
 	err = r.Tf.TerraformInit(ctx, tf)
 	if err != nil {
 		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to init terraform: %v", err), nil)
 	}
 
-	// Validate terraform
 	valResult, err := tf.Validate(ctx)
 	if err != nil {
 		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
@@ -330,8 +241,76 @@ func (r *PlanReconciler) executePlan(ctx context.Context, plan *tfreconcilev1alp
 
 	r.Recorder.Eventf(plan, v1.EventTypeNormal, PlanTFValidateEventReason, "Terraform validation completed, valid: %t", valResult.Valid)
 
+	if !valResult.Valid {
+		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+			"Terraform validation failed", nil)
+	}
+
+	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, plan)
+	if err != nil {
+		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+			fmt.Sprintf("Failed to execute terraform plan: %v", err), nil)
+	}
+
+	r.Recorder.Eventf(plan, v1.EventTypeNormal, PlanTFPlanEventReason, "Terraform plan completed, changes: %t", changed)
+
+	if plan.Spec.AutoApply {
+
+		if !changed && !plan.Spec.Destroy {
+			log.Info("plan has no changes, marking as applied", "plan", plan.Name)
+			now := metav1.NewTime(time.Now())
+			return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseApplied, "Plan completed - no changes needed", &planStatusUpdate{
+				completionTime: &now,
+			})
+		}
+
+		if changed || plan.Spec.Destroy {
+			if !plan.Spec.Destroy {
+				canApply, err := r.canPlanAutoApply(ctx, plan)
+				if err != nil {
+					return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+						fmt.Sprintf("Failed to check plan eligibility: %v", err), nil)
+				}
+				if !canApply {
+					log.Info("plan is no longer eligible for auto-apply (newer plan exists)", "plan", plan.Name)
+					return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseCancelled,
+						"Plan cancelled - newer plan exists for workspace", nil)
+				}
+			}
+
+			// For destroy plans, proceed even if changed is false -
+			// this could mean there's nothing to destroy, which is a successful outcome
+			err = r.executeTerraformApply(ctx, tf, plan)
+			if err != nil {
+				return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+					fmt.Sprintf("Failed to apply terraform: %v", err), nil)
+			}
+
+			r.Recorder.Eventf(plan, v1.EventTypeNormal, PlanTFApplyEventReason, "Terraform apply completed successfully")
+
+			// Update plan status to applied
+			now := metav1.NewTime(time.Now())
+			return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseApplied, "Apply completed successfully", &planStatusUpdate{
+				completionTime: &now,
+			})
+		}
+	}
+
+	// Plan completed but no auto-apply - update status to Planned
+	validRender := true // already validated above
+	return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhasePlanned, "Plan completed successfully", &planStatusUpdate{
+		hasChanges:  changed,
+		validRender: validRender,
+		planOutput:  planOutput,
+	})
+}
+
+// executeTerraformPlan executes the terraform plan command
+func (r *PlanReconciler) executeTerraformPlan(ctx context.Context, tf *tfexec.Terraform, plan *tfreconcilev1alpha1.Plan) (bool, string, error) {
 	// Execute plan
 	var changed bool
+	var err error
+
 	if plan.Spec.Destroy {
 		// For destroy plans, use terraform plan -destroy
 		changed, err = tf.Plan(ctx, tfexec.Destroy(true), tfexec.Out("plan.out"))
@@ -340,114 +319,25 @@ func (r *PlanReconciler) executePlan(ctx context.Context, plan *tfreconcilev1alp
 		changed, err = tf.Plan(ctx, tfexec.Out("plan.out"))
 	}
 	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
-			fmt.Sprintf("Failed to plan terraform: %v", err), nil)
+		return false, "", fmt.Errorf("failed to plan terraform: %w", err)
 	}
 
 	// Get plan output
 	planOutput, err := tf.ShowPlanFileRaw(ctx, "plan.out")
 	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
-			fmt.Sprintf("Failed to show plan file: %v", err), nil)
+		return false, "", fmt.Errorf("failed to show plan file: %w", err)
 	}
 
-	r.Recorder.Eventf(plan, v1.EventTypeNormal, PlanTFPlanEventReason, "Terraform plan completed, changes: %t", changed)
-
-	// Update plan status with results
-	result, err := r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhasePlanned, "Plan completed successfully", &planStatusUpdate{
-		hasChanges:  changed,
-		validRender: valResult.Valid,
-		planOutput:  planOutput,
-	})
-	if err != nil {
-		return result, err
-	}
-
-	// If auto-apply is enabled and there are changes, continue to apply phase
-	if plan.Spec.AutoApply && changed {
-		// Update status to applying
-		result, err := r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseApplying, "Starting terraform apply", nil)
-		if err != nil {
-			return result, err
-		}
-		// Continue to execute apply immediately
-		return r.executeApply(ctx, plan, workspace)
-	}
-
-	return ctrl.Result{}, nil
+	return changed, planOutput, nil
 }
 
-func (r *PlanReconciler) executeApply(ctx context.Context, plan *tfreconcilev1alpha1.Plan, workspace tfreconcilev1alpha1.Workspace) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
-	// Get environment variables for execution
-	envs, err := r.getEnvsForExecution(ctx, workspace)
-	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
-			fmt.Sprintf("Failed to get envs for execution: %v", err), nil)
-	}
-
-	// Clean up temporary AWS token file at the end
-	if tempTokenPath, exists := envs["AWS_WEB_IDENTITY_TOKEN_FILE"]; exists {
-		defer func() {
-			if err := os.Remove(tempTokenPath); err != nil {
-				log.Error(err, "failed to cleanup temp token file", "file", tempTokenPath)
-			}
-		}()
-	}
-
-	// Get terraform executable
-	tf, terraformRCPath, err := r.Tf.GetTerraformForWorkspace(ctx, workspace)
-	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
-			fmt.Sprintf("Failed to get terraform executable: %v", err), nil)
-	}
-
-	// Set up environment
-	envs["HOME"] = os.Getenv("HOME")
-	envs["PATH"] = os.Getenv("PATH")
-	envs["TF_PLUGIN_CACHE_DIR"] = r.Tf.PluginCacheDir
-	envs["TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE"] = "true"
-
-	if terraformRCPath != "" {
-		envs["TF_CLI_CONFIG_FILE"] = terraformRCPath
-	}
-
-	err = tf.SetEnv(envs)
-	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
-			fmt.Sprintf("Failed to set terraform env: %v", err), nil)
-	}
-
-	// Write the HCL content to main.tf
-	// For destroy plans, we still need the original HCL content for proper state management
-	err = r.writeHclContent(tf.WorkingDir(), plan.Spec.Render)
-	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
-			fmt.Sprintf("Failed to write HCL content: %v", err), nil)
-	}
-
-	// For more reliable execution, use direct apply without saved plan file
-	// This prevents "stale plan" errors when state changes between plan and apply phases
+// executeTerraformApply executes the terraform apply command
+func (r *PlanReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.Terraform, plan *tfreconcilev1alpha1.Plan) error {
 	if plan.Spec.Destroy {
-		// For destroy plans, run destroy with auto-approve
-		err = tf.Apply(ctx, tfexec.Destroy(true))
+		return tf.Destroy(ctx)
 	} else {
-		// For normal plans, run apply with auto-approve
-		err = tf.Apply(ctx)
+		return tf.Apply(ctx)
 	}
-	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
-			fmt.Sprintf("Failed to apply terraform: %v", err), nil)
-	}
-
-	r.Recorder.Eventf(plan, v1.EventTypeNormal, PlanTFApplyEventReason, "Terraform apply completed successfully")
-
-	// Update plan status to applied
-	now := metav1.NewTime(time.Now())
-	return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseApplied, "Apply completed successfully", &planStatusUpdate{
-		completionTime: &now,
-	})
 }
 
 func (r *PlanReconciler) handleDeletion(ctx context.Context, plan *tfreconcilev1alpha1.Plan) (ctrl.Result, error) {
@@ -600,15 +490,12 @@ func (r *PlanReconciler) setupAWSAuthentication(ctx context.Context, ws tfreconc
 }
 
 // canPlanRun checks if this plan is eligible to run.
-// For destroy plans, they can always run.
-// For regular plans, only the latest plan for a workspace can run.
+// Rules:
+// 1. Only one type of plan (regular or destroy) can run per workspace at a time
+// 2. Destroy plans take priority over regular plans
+// 3. Among plans of the same type, only the newest can run
 func (r *PlanReconciler) canPlanRun(ctx context.Context, plan *tfreconcilev1alpha1.Plan) (bool, error) {
-	// Destroy plans can always run
-	if plan.Spec.Destroy {
-		return true, nil
-	}
-
-	// Get all plans for this workspace (excluding destroy plans)
+	// Get all plans for this workspace
 	planList := &tfreconcilev1alpha1.PlanList{}
 	err := r.Client.List(ctx, planList,
 		client.InNamespace(plan.Namespace),
@@ -618,83 +505,54 @@ func (r *PlanReconciler) canPlanRun(ctx context.Context, plan *tfreconcilev1alph
 		return false, fmt.Errorf("failed to list plans for workspace: %w", err)
 	}
 
-	// Find the newest non-destroy plan for this workspace
-	var newestPlan *tfreconcilev1alpha1.Plan
+	// Separate plans by type and find the newest of each
+	var newestRegularPlan *tfreconcilev1alpha1.Plan
+	var newestDestroyPlan *tfreconcilev1alpha1.Plan
+
 	for i := range planList.Items {
 		p := &planList.Items[i]
-		// Skip destroy plans for this comparison
 		if p.Spec.Destroy {
-			continue
-		}
-		if newestPlan == nil || p.CreationTimestamp.After(newestPlan.CreationTimestamp.Time) {
-			newestPlan = p
+			if newestDestroyPlan == nil || p.CreationTimestamp.After(newestDestroyPlan.CreationTimestamp.Time) {
+				newestDestroyPlan = p
+			}
+		} else {
+			if newestRegularPlan == nil || p.CreationTimestamp.After(newestRegularPlan.CreationTimestamp.Time) {
+				newestRegularPlan = p
+			}
 		}
 	}
 
-	// If no plans found (shouldn't happen), allow this one
-	if newestPlan == nil {
+	// If this is a destroy plan
+	if plan.Spec.Destroy {
+		// Only the newest destroy plan can run
+		if newestDestroyPlan == nil || newestDestroyPlan.Name != plan.Name {
+			return false, nil
+		}
+		// Destroy plans take priority - they can run even if there are regular plans
 		return true, nil
 	}
 
-	// This plan can run only if it's the newest plan
-	return newestPlan.Name == plan.Name, nil
-}
-
-// canPlanAutoApply checks if this plan is eligible for auto-apply.
-// It ensures only the latest plan for a workspace can auto-apply, unless:
-// - The latest plan doesn't have autoApply=true AND
-// - This plan has autoApply=true
-func (r *PlanReconciler) canPlanAutoApply(ctx context.Context, plan *tfreconcilev1alpha1.Plan) (bool, error) {
-	// First check if the plan can run at all
-	canRun, err := r.canPlanRun(ctx, plan)
-	if err != nil {
-		return false, err
-	}
-	if !canRun {
+	// If this is a regular plan
+	// First check if there are any destroy plans - if so, regular plans cannot run
+	if newestDestroyPlan != nil {
 		return false, nil
 	}
 
-	// Get all plans for this workspace
-	planList := &tfreconcilev1alpha1.PlanList{}
-	err = r.Client.List(ctx, planList,
-		client.InNamespace(plan.Namespace),
-		client.MatchingLabels{"tf-reconcile.lego.com/workspace": plan.Spec.WorkspaceRef.Name},
-	)
-	if err != nil {
-		return false, fmt.Errorf("failed to list plans for workspace: %w", err)
+	// If no destroy plans, only the newest regular plan can run
+	if newestRegularPlan == nil || newestRegularPlan.Name != plan.Name {
+		return false, nil
 	}
 
-	// Find the newest plan for this workspace (excluding destroy plans for this logic)
-	var newestPlan *tfreconcilev1alpha1.Plan
-	for i := range planList.Items {
-		p := &planList.Items[i]
-		// Skip destroy plans for this comparison
-		if p.Spec.Destroy {
-			continue
-		}
-		if newestPlan == nil || p.CreationTimestamp.After(newestPlan.CreationTimestamp.Time) {
-			newestPlan = p
-		}
-	}
+	return true, nil
+}
 
-	// If no plans found (shouldn't happen), allow this one
-	if newestPlan == nil {
-		return true, nil
-	}
-
-	// If this plan is the newest plan, it can auto-apply
-	if newestPlan.Name == plan.Name {
-		return true, nil
-	}
-
-	// If there's a newer plan, check if the newer plan has autoApply disabled
-	// In that case, allow the current plan to auto-apply if it has autoApply enabled
-	if !newestPlan.Spec.AutoApply && plan.Spec.AutoApply {
-		return true, nil
-	}
-
-	// Otherwise, this plan should not auto-apply
-	return false, nil
+// canPlanAutoApply checks if this plan is eligible for auto-apply.
+// Since canPlanRun already handles mutual exclusion between regular and destroy plans,
+// we just need to check if this plan can run at all.
+func (r *PlanReconciler) canPlanAutoApply(ctx context.Context, plan *tfreconcilev1alpha1.Plan) (bool, error) {
+	// The mutual exclusion logic is already handled in canPlanRun
+	// If a plan can run, it can also auto-apply (assuming it has AutoApply=true, which is checked by the caller)
+	return r.canPlanRun(ctx, plan)
 }
 
 // SetupWithManager sets up the controller with the Manager.
