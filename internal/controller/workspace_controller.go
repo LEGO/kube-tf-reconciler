@@ -3,21 +3,16 @@ package controller
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
 	"github.com/LEGO/kube-tf-reconciler/pkg/render"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/hashicorp/hcl/v2/hclwrite"
-	"github.com/hashicorp/terraform-exec/tfexec"
-	authv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -33,7 +28,6 @@ const (
 	TFApplyEventReason   = "TerraformApply"
 	TFDestroyEventReason = "TerraformDestroy"
 
-	// Finalizer name
 	workspaceFinalizer = "tf-reconcile.lego.com/finalizer"
 )
 
@@ -62,51 +56,39 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	}
 
-	if r.alreadyProcessedOnce(ws) {
+	// Handle deletion first
+	if !ws.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&ws, workspaceFinalizer) {
+			return r.handleWorkspaceDeletion(ctx, &ws)
+		}
+
+		return ctrl.Result{}, nil
+	}
+
+	if !controllerutil.ContainsFinalizer(&ws, workspaceFinalizer) {
+		controllerutil.AddFinalizer(&ws, workspaceFinalizer)
+		if err := r.Update(ctx, &ws); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	err := r.cancelOlderPlans(ctx, ws)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to cancel older plans: %w", err)
+	}
+
+	needsNewPlan, err := r.needsNewPlan(ctx, ws)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to check if new plan is needed: %w", err)
+	}
+
+	if !needsNewPlan && r.alreadyProcessedOnce(ws) {
 		log.Info("already processed workspace, skipping")
 		return ctrl.Result{}, nil
 	}
 
-	envs, err := r.getEnvsForExecution(ctx, ws)
-	if err != nil {
-		err = fmt.Errorf("failed to get envs for execution: %w", err)
-		r.Recorder.Eventf(&ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
-		return ctrl.Result{}, err
-	}
-
-	// Clean up temporary AWS token file at the end of reconciliation
-	if tempTokenPath, exists := envs["AWS_WEB_IDENTITY_TOKEN_FILE"]; exists {
-		defer func() {
-			if err := os.Remove(tempTokenPath); err != nil {
-				log.Error(err, "failed to cleanup temp token file", "file", tempTokenPath)
-			}
-		}()
-	}
-
-	tf, terraformRCPath, err := r.Tf.GetTerraformForWorkspace(ctx, ws)
-	if err != nil {
-		err = fmt.Errorf("failed to get terraform executable %s: %w", req.String(), err)
-		r.Recorder.Eventf(&ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
-		return ctrl.Result{}, err
-	}
-
-	envs["HOME"] = os.Getenv("HOME")
-	envs["PATH"] = os.Getenv("PATH")
-	envs["TF_PLUGIN_CACHE_DIR"] = r.Tf.PluginCacheDir
-	envs["TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE"] = "true"
-
-	if terraformRCPath != "" {
-		envs["TF_CLI_CONFIG_FILE"] = terraformRCPath
-	}
-
-	err = tf.SetEnv(envs)
-	if err != nil {
-		err = fmt.Errorf("failed to set terraform env: %w", err)
-		r.Recorder.Eventf(&ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
-		return ctrl.Result{}, err
-	}
-
-	result, err := r.renderHcl(tf.WorkingDir(), ws)
+	result, err := r.renderHclForWorkspace(ws)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to render workspace %s: %w", req.String(), err)
 	}
@@ -122,119 +104,31 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
 	}
 
-	err = r.Tf.TerraformInit(ctx, tf)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to init workspace: %w", err)
-	}
-
-	valResult, err := tf.Validate(ctx)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to validate workspace: %w", err)
-	}
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
-			return err
+	if needsNewPlan {
+		plan, err := r.createOrUpdatePlan(ctx, ws, string(result))
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to create or update plan: %w", err)
 		}
-		ws.Status.ValidRender = valResult.Valid
-		return r.Client.Status().Update(ctx, &ws)
-	})
 
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
-	}
-
-	if !ws.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&ws, workspaceFinalizer) {
-			// Only run destroy if PreventDestroy is false
-			if !ws.Spec.PreventDestroy {
-				err = tf.Destroy(ctx)
-				if err != nil {
-					return ctrl.Result{}, fmt.Errorf("failed to destroy resource: %w", err)
-				}
-
-				r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFDestroyEventReason, "Successfully destroyed resources")
-			} else {
-				log.Info("skipping terraform destroy due to the preventDestroy flag")
-				r.Recorder.Eventf(&ws, v1.EventTypeNormal, "DestroyPrevented",
-					"Terraform destroy skipped due to preventDestroy")
+		// Update workspace status with current plan reference
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
+				return err
 			}
-			log.Info("deleted workspace")
-
-			controllerutil.RemoveFinalizer(&ws, workspaceFinalizer)
-			if err := r.Update(ctx, &ws); err != nil {
-				return ctrl.Result{}, err
+			ws.Status.CurrentPlan = &tfreconcilev1alpha1.PlanReference{
+				Name:      plan.Name,
+				Namespace: plan.Namespace,
 			}
 			ws.Status.ObservedGeneration = ws.Generation
-			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
-					return err
-				}
-				ws.Status.ValidRender = valResult.Valid
-				return r.Client.Status().Update(ctx, &ws)
-			})
-
-			return ctrl.Result{}, err
-
-		}
-		// Stop reconciliation as resource is being deleted
-		return ctrl.Result{}, nil
-	}
-
-	if !controllerutil.ContainsFinalizer(&ws, workspaceFinalizer) {
-		controllerutil.AddFinalizer(&ws, workspaceFinalizer)
-		if err := r.Update(ctx, &ws); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	changed, err := tf.Plan(ctx, tfexec.Out("plan.out"))
-	if err != nil {
-		err = fmt.Errorf("failed to plan workspace %s: %w", req.String(), err)
-		r.Recorder.Eventf(&ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
+			return r.Client.Status().Update(ctx, &ws)
+		})
 		return ctrl.Result{}, err
 	}
-	plan, err := tf.ShowPlanFileRaw(ctx, "plan.out")
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to show plan file: %w", err)
-	}
-	r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFPlanEventReason, "Workspace %s planned", req.String())
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
-			return err
-		}
-		ws.Status.LatestPlan = plan
-		return r.Client.Status().Update(ctx, &ws)
-	})
 
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
-	}
-
-	log.WithValues("changed", changed).Info("planned workspace")
-
-	if ws.Spec.AutoApply && changed {
-		err = tf.Apply(ctx)
-		if err != nil {
-			err = fmt.Errorf("failed to apply workspace %s: %w", req.String(), err)
-			r.Recorder.Eventf(&ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
-			return ctrl.Result{}, err
-		}
-		r.Recorder.Eventf(&ws, v1.EventTypeNormal, TFApplyEventReason, "Workspace %s applied", req.String())
-		log.WithValues("changed", changed).Info("applied workspace")
-	}
-
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
-			return err
-		}
-		ws.Status.ObservedGeneration = ws.Generation
-		return r.Client.Status().Update(ctx, &ws)
-	})
-	return ctrl.Result{}, err
+	return ctrl.Result{}, nil
 }
 
-func (r *WorkspaceReconciler) renderHcl(workspaceDir string, ws tfreconcilev1alpha1.Workspace) ([]byte, error) {
+func (r *WorkspaceReconciler) renderHclForWorkspace(ws tfreconcilev1alpha1.Workspace) ([]byte, error) {
 	f := hclwrite.NewEmptyFile()
 	err := render.Workspace(f.Body(), ws)
 	renderErr := fmt.Errorf("failed to render workspace %s/%s", ws.Namespace, ws.Name)
@@ -252,12 +146,211 @@ func (r *WorkspaceReconciler) renderHcl(workspaceDir string, ws tfreconcilev1alp
 		return f.Bytes(), fmt.Errorf("%w: failed to render module: %w", renderErr, err)
 	}
 
-	err = os.WriteFile(filepath.Join(workspaceDir, "main.tf"), f.Bytes(), 0644)
-	if err != nil {
-		return f.Bytes(), fmt.Errorf("%w: failed to write workspace: %w", renderErr, err)
+	return f.Bytes(), nil
+}
+
+func (r *WorkspaceReconciler) createOrUpdatePlan(ctx context.Context, ws tfreconcilev1alpha1.Workspace, render string) (*tfreconcilev1alpha1.Plan, error) {
+	planName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
+
+	plan := &tfreconcilev1alpha1.Plan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      planName,
+			Namespace: ws.Namespace,
+			Labels: map[string]string{
+				"tf-reconcile.lego.com/workspace": ws.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: ws.APIVersion,
+					Kind:       ws.Kind,
+					Name:       ws.Name,
+					UID:        ws.UID,
+					Controller: func(b bool) *bool { return &b }(true),
+				},
+			},
+		},
+		Spec: tfreconcilev1alpha1.PlanSpec{
+			WorkspaceRef: tfreconcilev1alpha1.WorkspaceReference{
+				Name:      ws.Name,
+				Namespace: ws.Namespace,
+			},
+			AutoApply:        ws.Spec.AutoApply,
+			TerraformVersion: ws.Spec.TerraformVersion,
+			Render:           render,
+		},
 	}
 
-	return f.Bytes(), nil
+	err := r.Client.Create(ctx, plan)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("failed to create plan: %w", err)
+	}
+
+	if apierrors.IsAlreadyExists(err) {
+		existingPlan := &tfreconcilev1alpha1.Plan{}
+		err = r.Client.Get(ctx, client.ObjectKey{Name: planName, Namespace: ws.Namespace}, existingPlan)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get existing plan: %w", err)
+		}
+		return existingPlan, nil
+	}
+
+	return plan, nil
+}
+
+func (r *WorkspaceReconciler) handleWorkspaceDeletion(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// Step 1: If preventDestroy is true, skip terraform destroy and go straight to cleanup
+	if ws.Spec.PreventDestroy {
+		log.Info("skipping terraform destroy due to the preventDestroy flag")
+		r.Recorder.Eventf(ws, v1.EventTypeNormal, "DestroyPrevented",
+			"Terraform destroy skipped due to preventDestroy")
+		return r.cleanupWorkspaceAndFinalize(ctx, ws)
+	}
+
+	// Step 1.5: Check if destroy has already been completed (to prevent creating multiple destroy plans)
+	if ws.Annotations != nil && ws.Annotations["tf-reconcile.lego.com/destroy-completed"] == "true" {
+		log.Info("destroy already completed, proceeding to cleanup")
+		return r.cleanupWorkspaceAndFinalize(ctx, ws)
+	}
+
+	// Step 2: Check if we have a destroy plan in progress
+	destroyPlan, err := r.getDestroyPlan(ctx, *ws)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to check for destroy plan: %w", err)
+	}
+
+	// Step 3: If no destroy plan exists, create one
+	if destroyPlan == nil {
+		err := r.createDestroyPlan(ctx, *ws)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to create destroy plan: %w", err)
+		}
+
+		log.Info("created destroy plan for workspace deletion")
+		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFDestroyEventReason, "Created destroy plan for workspace deletion")
+
+		return ctrl.Result{RequeueAfter: time.Second * 20}, nil
+	}
+
+	// Step 4: Check destroy plan status
+	if destroyPlan.Status.Phase == tfreconcilev1alpha1.PlanPhaseApplied {
+		log.Info("destroy plan completed successfully")
+		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFDestroyEventReason, "Successfully destroyed resources")
+
+		// Mark destroy as completed to prevent race conditions
+		err := r.markDestroyCompleted(ctx, ws)
+		if err != nil {
+			log.Error(err, "failed to mark destroy as completed, but proceeding with cleanup")
+		}
+
+		return r.cleanupWorkspaceAndFinalize(ctx, ws)
+
+	} else {
+		log.Info("waiting for destroy plan to complete", "phase", destroyPlan.Status.Phase)
+		return ctrl.Result{RequeueAfter: time.Second * 20}, nil
+	}
+}
+
+func (r *WorkspaceReconciler) getDestroyPlan(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (*tfreconcilev1alpha1.Plan, error) {
+	planList := &tfreconcilev1alpha1.PlanList{}
+	err := r.Client.List(ctx, planList,
+		client.InNamespace(ws.Namespace),
+		client.MatchingLabels{
+			"tf-reconcile.lego.com/workspace": ws.Name,
+			"tf-reconcile.lego.com/destroy":   "true",
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list destroy plans for workspace: %w", err)
+	}
+
+	var latestDestroyPlan *tfreconcilev1alpha1.Plan
+	for i := range planList.Items {
+		plan := &planList.Items[i]
+		if latestDestroyPlan == nil || plan.CreationTimestamp.After(latestDestroyPlan.CreationTimestamp.Time) {
+			latestDestroyPlan = plan
+		}
+	}
+
+	return latestDestroyPlan, nil
+}
+
+func (r *WorkspaceReconciler) createDestroyPlan(ctx context.Context, ws tfreconcilev1alpha1.Workspace) error {
+	// Use the current workspace render state for the destroy plan
+	// This ensures we destroy based on the most recent workspace configuration
+	render, err := r.renderHclForWorkspace(ws)
+	if err != nil {
+		return fmt.Errorf("failed to render workspace for destroy plan: %w", err)
+	}
+
+	destroyPlanName := fmt.Sprintf("%s-destroy-%d", ws.Name, time.Now().Unix())
+
+	destroyPlan := &tfreconcilev1alpha1.Plan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      destroyPlanName,
+			Namespace: ws.Namespace,
+			Labels: map[string]string{
+				"tf-reconcile.lego.com/workspace": ws.Name,
+				"tf-reconcile.lego.com/destroy":   "true",
+			},
+			// Don't set owner reference for destroy plans so they can complete
+			// even after the workspace is deleted
+		},
+		Spec: tfreconcilev1alpha1.PlanSpec{
+			WorkspaceRef: tfreconcilev1alpha1.WorkspaceReference{
+				Name:      ws.Name,
+				Namespace: ws.Namespace,
+			},
+			AutoApply:        true,
+			TerraformVersion: ws.Spec.TerraformVersion,
+			Render:           string(render),
+			Destroy:          true,
+		},
+	}
+
+	return r.Client.Create(ctx, destroyPlan)
+}
+
+func (r *WorkspaceReconciler) cleanupWorkspaceAndFinalize(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	planList := &tfreconcilev1alpha1.PlanList{}
+	err := r.Client.List(ctx, planList,
+		client.InNamespace(ws.Namespace),
+		client.MatchingLabels{"tf-reconcile.lego.com/workspace": ws.Name},
+	)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to list plans for cleanup: %w", err)
+	}
+
+	// First pass: Mark all plans for deletion if they're not already being deleted
+	plansToDelete := len(planList.Items) > 0
+	for i := range planList.Items {
+		plan := &planList.Items[i]
+		if plan.DeletionTimestamp.IsZero() { // Only delete if not already being deleted
+			err := r.Client.Delete(ctx, plan)
+			if err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("failed to delete plan %s: %w", plan.Name, err)
+			}
+			log.Info("marked plan for deletion", "plan", plan.Name)
+		}
+	}
+
+	// If we just marked plans for deletion, requeue to wait for them to be actually deleted
+	if plansToDelete {
+		log.Info("waiting for plans to be deleted before finalizing workspace")
+		return ctrl.Result{RequeueAfter: time.Second * 20}, nil
+	}
+
+	// All plans have been deleted, now we can remove the finalizer from workspace
+	controllerutil.RemoveFinalizer(ws, workspaceFinalizer)
+	if err := r.Update(ctx, ws); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	log.Info("successfully finalized workspace deletion - all plans have been deleted")
+	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -269,113 +362,106 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *WorkspaceReconciler) alreadyProcessedOnce(ws tfreconcilev1alpha1.Workspace) bool {
-	return ws.Status.ObservedGeneration == ws.Generation
+	// A workspace is considered processed if:
+	// 1. ObservedGeneration matches Generation (resource hasn't changed)
+	// 2. AND it has been actually processed (has CurrentRender set)
+	// This prevents skipping newly created workspaces that haven't been processed yet
+	return ws.Status.ObservedGeneration == ws.Generation && ws.Status.CurrentRender != ""
 }
 
 func (r *WorkspaceReconciler) dueForRefresh(t time.Time, ws tfreconcilev1alpha1.Workspace) bool {
 	return t.After(ws.Status.NextRefreshTimestamp.Time)
 }
 
-func (r *WorkspaceReconciler) refreshState(ctx context.Context, ws tfreconcilev1alpha1.Workspace) error {
-	_, _, err := r.Tf.GetTerraformForWorkspace(ctx, ws)
+func (r *WorkspaceReconciler) cancelOlderPlans(ctx context.Context, ws tfreconcilev1alpha1.Workspace) error {
+	log := logf.FromContext(ctx)
+
+	planList := &tfreconcilev1alpha1.PlanList{}
+	err := r.Client.List(ctx, planList,
+		client.InNamespace(ws.Namespace),
+		client.MatchingLabels{"tf-reconcile.lego.com/workspace": ws.Name},
+	)
 	if err != nil {
-		return fmt.Errorf("refreshState: failed to get terraform executable %s: %w", ws.Name, err)
+		return fmt.Errorf("failed to list plans for workspace: %w", err)
 	}
 
-	ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(time.Minute * 5))
-	return r.Client.Status().Update(ctx, &ws)
-}
+	currentPlanName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
 
-func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (map[string]string, error) {
-	if ws.Spec.TFExec == nil {
-		return map[string]string{}, nil
-	}
-	if ws.Spec.TFExec.Env == nil {
-		return map[string]string{}, nil
-	}
-	envs := make(map[string]string)
-	for _, env := range ws.Spec.TFExec.Env {
-		if env.Name == "" {
+	for i := range planList.Items {
+		plan := &planList.Items[i]
+
+		if plan.Name == currentPlanName || plan.Spec.Destroy {
 			continue
 		}
-		if env.Value != "" {
-			envs[env.Name] = env.Value
+
+		// Skip if already in a truly terminal state (applied or cancelled)
+		// Note: Errored plans are NOT skipped because they retry automatically
+		if plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseApplied ||
+			plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseCancelled {
 			continue
 		}
-		if env.ConfigMapKeyRef != nil {
-			var cm v1.ConfigMap
-			err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: env.ConfigMapKeyRef.Name}, &cm)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get configmap %s: %w", env.ConfigMapKeyRef.Name, err)
-			}
-			if val, ok := cm.Data[env.ConfigMapKeyRef.Key]; ok {
-				envs[env.Name] = val
-				continue
-			}
-		}
-		if env.SecretKeyRef != nil {
-			var secret v1.Secret
-			err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: env.SecretKeyRef.Name}, &secret)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get secret %s: %w", env.SecretKeyRef.Name, err)
-			}
-			if val, ok := secret.Data[env.SecretKeyRef.Key]; ok {
-				envs[env.Name] = string(val)
-				continue
-			}
-		}
-	}
 
-	// Handle AWS authentication with service account tokens
-	if ws.Spec.Authentication != nil {
-		if ws.Spec.Authentication.AWS != nil {
-			if ws.Spec.Authentication.AWS.ServiceAccountName != "" || ws.Spec.Authentication.AWS.RoleARN != "" {
-				tempTokenPath, err := r.setupAWSAuthentication(ctx, ws)
-				if err != nil {
-					return nil, fmt.Errorf("failed to setup AWS authentication: %w", err)
+		// Cancel the plan if it's running or errored
+		if plan.Status.Phase == tfreconcilev1alpha1.PlanPhasePlanning ||
+			plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseApplying ||
+			plan.Status.Phase == tfreconcilev1alpha1.PlanPhasePlanned ||
+			plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseErrored {
+
+			log.Info("cancelling older plan", "plan", plan.Name, "currentPhase", plan.Status.Phase)
+
+			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := r.Client.Get(ctx, client.ObjectKeyFromObject(plan), plan); err != nil {
+					return err
 				}
-
-				envs["AWS_WEB_IDENTITY_TOKEN_FILE"] = tempTokenPath
-				envs["AWS_ROLE_ARN"] = ws.Spec.Authentication.AWS.RoleARN
+				plan.Status.Phase = tfreconcilev1alpha1.PlanPhaseCancelled
+				plan.Status.Message = "Plan cancelled - newer plan exists for workspace"
+				plan.Status.ObservedGeneration = plan.Generation // Mark as processed to prevent restart
+				return r.Client.Status().Update(ctx, plan)
+			})
+			if err != nil {
+				log.Error(err, "failed to cancel older plan", "plan", plan.Name)
 			}
 		}
 	}
 
-	return envs, nil
+	return nil
 }
 
-func (r *WorkspaceReconciler) setupAWSAuthentication(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (string, error) {
-	var sa v1.ServiceAccount
-	err := r.Client.Get(ctx, types.NamespacedName{
+func (r *WorkspaceReconciler) needsNewPlan(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (bool, error) {
+	expectedPlanName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
+
+	var currentPlan tfreconcilev1alpha1.Plan
+	err := r.Client.Get(ctx, client.ObjectKey{
+		Name:      expectedPlanName,
 		Namespace: ws.Namespace,
-		Name:      ws.Spec.Authentication.AWS.ServiceAccountName,
-	}, &sa)
+	}, &currentPlan)
+
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+
 	if err != nil {
-		return "", fmt.Errorf("failed to get service account %s in namespace %s: %w",
-			ws.Spec.Authentication.AWS.ServiceAccountName, ws.Namespace, err)
+		return false, fmt.Errorf("failed to get current plan: %w", err)
 	}
 
-	tokenRequest := &authv1.TokenRequest{
-		Spec: authv1.TokenRequestSpec{
-			ExpirationSeconds: func(i int64) *int64 { return &i }(600),
-		},
+	// Plan exists, check if workspace has changed since plan was created
+	if ws.Status.ObservedGeneration != ws.Generation {
+		return true, nil
 	}
 
-	err = r.Client.SubResource("token").Create(ctx, &sa, tokenRequest)
-	if err != nil {
-		return "", fmt.Errorf("failed to create token for service account %s: %w",
-			ws.Spec.Authentication.AWS.ServiceAccountName, err)
-	}
-	tokenFile, err := os.CreateTemp("", fmt.Sprintf("aws-token-%s-%s-*", ws.Namespace, ws.Name))
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp token file: %w", err)
-	}
-	defer tokenFile.Close()
-
-	if _, err := tokenFile.Write([]byte(tokenRequest.Status.Token)); err != nil {
-		os.Remove(tokenFile.Name())
-		return "", fmt.Errorf("failed to write token to temp file: %w", err)
+	if ws.Status.CurrentPlan == nil || ws.Status.CurrentPlan.Name != expectedPlanName {
+		return true, nil
 	}
 
-	return tokenFile.Name(), nil
+	return false, nil
+}
+
+func (r *WorkspaceReconciler) markDestroyCompleted(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) error {
+	// Add annotation to mark destroy as completed
+	if ws.Annotations == nil {
+		ws.Annotations = make(map[string]string)
+	}
+	ws.Annotations["tf-reconcile.lego.com/destroy-completed"] = "true"
+
+	return r.Update(ctx, ws)
 }

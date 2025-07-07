@@ -161,8 +161,8 @@ type WorkspaceSpec struct {
 
 // WorkspaceStatus defines the observed state of Workspace.
 type WorkspaceStatus struct {
-	// LatestPlan is the latest plan of the workspace
-	LatestPlan string `json:"latestPlan"`
+	// CurrentPlan is a reference to the current Plan resource
+	CurrentPlan *PlanReference `json:"currentPlan,omitempty"`
 	// CurrentRender is the current render of the workspace
 	CurrentRender string `json:"currentRender"`
 	// ValidRender is the result of the validation of the workspace
@@ -172,6 +172,17 @@ type WorkspaceStatus struct {
 	NextRefreshTimestamp metav1.Time `json:"nextRefreshTimestamp"`
 	// ObservedGeneration is the observed generation of the workspace
 	ObservedGeneration int64 `json:"observedGeneration"`
+}
+
+// PlanReference contains a reference to a Plan resource
+type PlanReference struct {
+	// Name of the Plan
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Namespace of the Plan, defaults to the same namespace as the Workspace
+	// +kubebuilder:validation:Optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // Workspace is the Schema for the workspaces API.
