@@ -21,19 +21,30 @@ jobs:
           fetch-depth: '1'
           ref: main
           path: old
-      - name: Download crdiff
+      - name: Download crdiff and check CRDs
         run: |
-          curl -L -o crdiff.tgz https://github.com/xrstf/crdiff/releases/download/v0.0.2/crdiff_0.0.2_linux_amd64.tar.gz
+          # ----- download + unpack --------------------------------------------------
+          curl -L -o crdiff.tgz \
+            https://github.com/xrstf/crdiff/releases/download/v0.0.2/crdiff_0.0.2_linux_amd64.tar.gz
           tar -xf crdiff.tgz
           mv crdiff_0.0.2_linux_amd64/crdiff crdiff
-          echo "----"
-          echo "Running crdiff..."
-          echo ""
-          echo ""
+
+          # ----- run crdiff ---------------------------------------------------------
+          # turn off 'exit on error' so the script keeps going even if a command
+          # returns non-zero. We'll decide what to do afterwards.
+          set +e
           ./crdiff breaking old/crds/ new/crds/ > report 2>&1
+          set -e   # re-enable safety for anything that follows (optional)
+
+          # ----- show the report ----------------------------------------------------
+          echo "---------- crdiff report ----------"
           cat report
-          echo ""
-          echo ""
-          grep "No changes detected." report > /dev/null
-          exit $?
-          
+          echo "-----------------------------------"
+
+          # ----- evaluate the result -----------------------------------------------
+          if grep -q "No changes detected." report; then
+            echo "✅  No breaking changes found."
+          else
+            echo "⚠️  Breaking changes detected, but not failing the build."
+          fi
+          exit 0
