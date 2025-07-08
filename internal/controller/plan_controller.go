@@ -231,12 +231,14 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 
 	err = r.Tf.TerraformInit(ctx, tf)
 	if err != nil {
+		log.Error(err, "failed to init terraform", "plan", plan.Name)
 		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to init terraform: %v", err), nil)
 	}
 
 	valResult, err := tf.Validate(ctx)
 	if err != nil {
+		log.Error(err, "failed to validate terraform", "plan", plan.Name)
 		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to validate terraform: %v", err), nil)
 	}
@@ -250,6 +252,7 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 
 	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, plan)
 	if err != nil {
+		log.Error(err, "failed to execute terraform plan", "plan", plan.Name)
 		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to execute terraform plan: %v", err), nil)
 	}
@@ -287,6 +290,7 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 			// this could mean there's nothing to destroy, which is a successful outcome
 			applyOutput, err := r.executeTerraformApply(ctx, tf, plan)
 			if err != nil {
+				log.Error(err, "failed to apply terraform", "plan", plan.Name)
 				return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 					fmt.Sprintf("Failed to apply terraform: %v", err), nil)
 			}
