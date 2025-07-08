@@ -257,6 +257,7 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 			fmt.Sprintf("Failed to execute terraform plan: %v", err), nil)
 	}
 
+	log.Info("terraform plan completed", "plan", plan.Name, "changes", changed)
 	r.Recorder.Eventf(plan, v1.EventTypeNormal, PlanTFPlanEventReason, "Terraform plan completed, changes: %t", changed)
 
 	if plan.Spec.AutoApply {
@@ -295,6 +296,7 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 					fmt.Sprintf("Failed to apply terraform: %v", err), nil)
 			}
 
+			log.Info("terraform apply completed successfully", "plan", plan.Name)
 			r.Recorder.Eventf(plan, v1.EventTypeNormal, PlanTFApplyEventReason, "Terraform apply completed successfully")
 
 			// Update plan status to applied
