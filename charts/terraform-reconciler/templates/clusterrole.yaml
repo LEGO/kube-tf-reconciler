@@ -31,6 +31,10 @@ rules:
     resources: ["events"]
     verbs: ["create", "patch"]
 
-  - apiGroups: [""]                 # core API group
-    resources: ["serviceaccounts"]  # what the reflector is listing
-    verbs: ["get", "list", "watch"] # or add create/update/patch if you need them
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create", "get"]
