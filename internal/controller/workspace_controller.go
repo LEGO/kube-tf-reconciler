@@ -343,13 +343,19 @@ func (r *WorkspaceReconciler) cleanupWorkspaceAndFinalize(ctx context.Context, w
 		return ctrl.Result{RequeueAfter: time.Second * 20}, nil
 	}
 
-	// All plans have been deleted, now we can remove the finalizer from workspace
+	err = r.Tf.CleanupWorkspace(*ws)
+	if err != nil {
+		log.Error(err, "failed to cleanup workspace directory, but proceeding with finalization")
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, "CleanupFailed",
+			"Failed to cleanup workspace directory: %v", err)
+	}
+
 	controllerutil.RemoveFinalizer(ws, workspaceFinalizer)
 	if err := r.Update(ctx, ws); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	log.Info("successfully finalized workspace deletion - all plans have been deleted")
+	log.Info("successfully finalized workspace deletion - all plans have been deleted and directory cleaned up")
 	return ctrl.Result{}, nil
 }
 
