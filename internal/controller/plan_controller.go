@@ -246,8 +246,15 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 	r.Recorder.Eventf(plan, v1.EventTypeNormal, PlanTFValidateEventReason, "Terraform validation completed, valid: %t", valResult.Valid)
 
 	if !valResult.Valid {
+		log.Error(err, "Terraform validation failed", "plan", plan.Name)
+
+		diagnosticsMsg := "Terraform validation failed with the following diagnostics:\n"
+		for _, diag := range valResult.Diagnostics {
+			diagnosticsMsg += fmt.Sprintf("Message: %s\n", diag.Summary)
+		}
+
 		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
-			"Terraform validation failed", nil)
+			diagnosticsMsg, nil)
 	}
 
 	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, plan)
@@ -392,6 +399,9 @@ func (r *PlanReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.T
 }
 
 func (r *PlanReconciler) handleDeletion(ctx context.Context, plan *tfreconcilev1alpha1.Plan) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	log.Info("handling plan deletion", "plan", plan.Name, "namespace", plan.Namespace)
+
 	if controllerutil.ContainsFinalizer(plan, planFinalizer) {
 		controllerutil.RemoveFinalizer(plan, planFinalizer)
 		if err := r.Update(ctx, plan); err != nil {
