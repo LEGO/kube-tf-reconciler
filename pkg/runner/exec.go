@@ -73,10 +73,9 @@ func (e *Exec) SetupWorkspace(ws string) (string, error) {
 	return fullPath, nil
 }
 
-// SetupTerraformRC creates a .terraformrc file in the workspace directory if content is provided
 func (e *Exec) SetupTerraformRC(workspacePath string, terraformRCContent string) (string, error) {
 	if terraformRCContent == "" {
-		return "", nil // No custom .terraformrc provided
+		return "", nil
 	}
 
 	// Create the config file in the workspace's directory to isolate configuration
@@ -150,4 +149,19 @@ func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws tfreconcilev1alp
 	}
 
 	return tf, terraformRCPath, nil
+}
+
+func (e *Exec) CleanupWorkspace(ws tfreconcilev1alpha1.Workspace) error {
+	workspacePath := filepath.Join(e.WorkspacesDir, ws.Namespace, ws.Name)
+
+	if _, err := os.Stat(workspacePath); os.IsNotExist(err) {
+		return nil
+	}
+
+	err := os.RemoveAll(workspacePath)
+	if err != nil {
+		return fmt.Errorf("failed to remove workspace directory %s: %w", workspacePath, err)
+	}
+
+	return nil
 }

@@ -226,11 +226,21 @@ spec:
           status:
             description: WorkspaceStatus defines the observed state of Workspace.
             properties:
+              currentPlan:
+                description: CurrentPlan is a reference to the current Plan resource
+                properties:
+                  name:
+                    description: Name of the Plan
+                    type: string
+                  namespace:
+                    description: Namespace of the Plan, defaults to the same namespace
+                      as the Workspace
+                    type: string
+                required:
+                - name
+                type: object
               currentRender:
                 description: CurrentRender is the current render of the workspace
-                type: string
-              latestPlan:
-                description: LatestPlan is the latest plan of the workspace
                 type: string
               nextRefreshTimestamp:
                 description: NextRefreshTimestamp is the next time the workspace will
@@ -247,7 +257,6 @@ spec:
                 type: boolean
             required:
             - currentRender
-            - latestPlan
             - observedGeneration
             - validRender
             type: object
