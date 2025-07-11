@@ -11,6 +11,7 @@ import (
 	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/hashicorp/terraform-exec/tfexec"
+	tfjson "github.com/hashicorp/terraform-json"
 	authv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -85,13 +86,14 @@ func (r *PlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		if apierrors.IsNotFound(err) && plan.Spec.Destroy {
 			log.Info("workspace not found for destroy plan, marking as completed", "plan", plan.Name)
 
-			return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseApplied,
+			return ctrl.Result{}, r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseApplied,
 				"Destroy plan completed - workspace already deleted", &planStatusUpdate{
 					completionTime: func() *metav1.Time { now := metav1.NewTime(time.Now()); return &now }(),
 				})
 		}
-		return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseErrored,
+		r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to get workspace: %v", err), nil)
+		return ctrl.Result{}, err
 	}
 
 	if !controllerutil.ContainsFinalizer(&plan, planFinalizer) {
@@ -126,12 +128,13 @@ func (r *PlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		if !plan.Spec.Destroy {
 			canRun, err := r.canPlanRun(ctx, &plan)
 			if err != nil {
-				return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseErrored,
+				r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseErrored,
 					fmt.Sprintf("Failed to check plan eligibility: %v", err), nil)
+				return ctrl.Result{}, err
 			}
 			if !canRun {
 				log.Info("plan is not eligible to run (newer plan exists)", "plan", plan.Name)
-				return r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseCancelled,
+				return ctrl.Result{}, r.updatePlanStatus(ctx, &plan, tfreconcilev1alpha1.PlanPhaseCancelled,
 					"Plan cancelled - newer plan exists for workspace", nil)
 			}
 		}
@@ -188,8 +191,9 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 	// Set up terraform environment (shared between plan and apply)
 	envs, err := r.getEnvsForExecution(ctx, workspace)
 	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+		r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to get envs for execution: %v", err), nil)
+		return ctrl.Result{}, err
 	}
 
 	cleanup := func() {
@@ -204,8 +208,9 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 	// Get terraform executable
 	tf, terraformRCPath, err := r.Tf.GetTerraformForWorkspace(ctx, workspace)
 	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+		r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to get terraform executable: %v", err), nil)
+		return ctrl.Result{}, err
 	}
 
 	envs["HOME"] = os.Getenv("HOME")
@@ -219,28 +224,32 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 
 	err = tf.SetEnv(envs)
 	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+		r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to set terraform env: %v", err), nil)
+		return ctrl.Result{}, err
 	}
 
 	err = r.writeHclContent(tf.WorkingDir(), plan.Spec.Render)
 	if err != nil {
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+		r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to write HCL content: %v", err), nil)
+		return ctrl.Result{}, err
 	}
 
 	err = r.Tf.TerraformInit(ctx, tf)
 	if err != nil {
 		log.Error(err, "failed to init terraform", "plan", plan.Name)
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+		r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to init terraform: %v", err), nil)
+		return ctrl.Result{}, err
 	}
 
 	valResult, err := tf.Validate(ctx)
 	if err != nil {
 		log.Error(err, "failed to validate terraform", "plan", plan.Name)
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+		r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to validate terraform: %v", err), nil)
+		return ctrl.Result{}, err
 	}
 
 	r.Recorder.Eventf(plan, v1.EventTypeNormal, PlanTFValidateEventReason, "Terraform validation completed, valid: %t", valResult.Valid)
@@ -248,20 +257,19 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 	if !valResult.Valid {
 		log.Error(err, "Terraform validation failed", "plan", plan.Name)
 
-		diagnosticsMsg := "Terraform validation failed with the following diagnostics:\n"
-		for _, diag := range valResult.Diagnostics {
-			diagnosticsMsg += fmt.Sprintf("Message: %s\n", diag.Summary)
-		}
+		diagnosticsMsg := formatValidationDiagnostics(valResult.Diagnostics)
 
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+		r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			diagnosticsMsg, nil)
+		return ctrl.Result{}, fmt.Errorf("terraform validation failed: %s", diagnosticsMsg)
 	}
 
 	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, plan)
 	if err != nil {
 		log.Error(err, "failed to execute terraform plan", "plan", plan.Name)
-		return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+		r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 			fmt.Sprintf("Failed to execute terraform plan: %v", err), nil)
+		return ctrl.Result{}, err
 	}
 
 	log.Info("terraform plan completed", "plan", plan.Name, "changes", changed)
@@ -272,7 +280,7 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 		if !changed && !plan.Spec.Destroy {
 			log.Info("plan has no changes, marking as applied", "plan", plan.Name)
 			now := metav1.NewTime(time.Now())
-			return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseApplied, "Plan completed - no changes needed", &planStatusUpdate{
+			return ctrl.Result{}, r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseApplied, "Plan completed - no changes needed", &planStatusUpdate{
 				hasChanges:     false,
 				validRender:    true,
 				planOutput:     planOutput,
@@ -284,12 +292,13 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 			if !plan.Spec.Destroy {
 				canApply, err := r.canPlanRun(ctx, plan)
 				if err != nil {
-					return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+					r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 						fmt.Sprintf("Failed to check plan eligibility: %v", err), nil)
+					return ctrl.Result{}, err
 				}
 				if !canApply {
 					log.Info("plan is no longer eligible for auto-apply (newer plan exists)", "plan", plan.Name)
-					return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseCancelled,
+					return ctrl.Result{}, r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseCancelled,
 						"Plan cancelled - newer plan exists for workspace", nil)
 				}
 			}
@@ -299,8 +308,9 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 			applyOutput, err := r.executeTerraformApply(ctx, tf, plan)
 			if err != nil {
 				log.Error(err, "failed to apply terraform", "plan", plan.Name)
-				return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
+				r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseErrored,
 					fmt.Sprintf("Failed to apply terraform: %v", err), nil)
+				return ctrl.Result{}, err
 			}
 
 			log.Info("terraform apply completed successfully", "plan", plan.Name)
@@ -308,7 +318,7 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 
 			// Update plan status to applied
 			now := metav1.NewTime(time.Now())
-			return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseApplied, "Apply completed successfully", &planStatusUpdate{
+			return ctrl.Result{}, r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhaseApplied, "Apply completed successfully", &planStatusUpdate{
 				hasChanges:     changed,
 				validRender:    true,
 				planOutput:     planOutput,
@@ -319,7 +329,7 @@ func (r *PlanReconciler) executePlanWorkflow(ctx context.Context, plan *tfreconc
 	}
 
 	// Plan completed but no auto-apply - update status to Planned with plan output
-	return r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhasePlanned, "Plan completed successfully", &planStatusUpdate{
+	return ctrl.Result{}, r.updatePlanStatus(ctx, plan, tfreconcilev1alpha1.PlanPhasePlanned, "Plan completed successfully", &planStatusUpdate{
 		hasChanges:  changed,
 		validRender: true,
 		planOutput:  planOutput,
@@ -352,9 +362,7 @@ func (r *PlanReconciler) executeTerraformPlan(ctx context.Context, tf *tfexec.Te
 	return changed, planOutput, nil
 }
 
-// executeTerraformApply executes the terraform apply command
 func (r *PlanReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.Terraform, plan *tfreconcilev1alpha1.Plan) (string, error) {
-	// Create buffers to capture stdout and stderr
 	var stdout, stderr bytes.Buffer
 	tf.SetStdout(&stdout)
 	tf.SetStderr(&stderr)
@@ -366,16 +374,13 @@ func (r *PlanReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.T
 		err = tf.Apply(ctx)
 	}
 
-	// Build comprehensive output
 	output := ""
 
-	// Add stdout content
 	if stdout.Len() > 0 {
 		output += "=== TERRAFORM OUTPUT ===\n"
 		output += stdout.String()
 	}
 
-	// Add stderr content (warnings, errors, diagnostics)
 	if stderr.Len() > 0 {
 		if output != "" {
 			output += "\n"
@@ -384,13 +389,11 @@ func (r *PlanReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.T
 		output += stderr.String()
 	}
 
-	// If there was an error, add error details
 	if err != nil && output != "" {
 		output += "\n=== ERROR DETAILS ===\n"
 		output += fmt.Sprintf("Exit error: %v", err)
 	}
 
-	// If no output was captured but there was an error, at least show the error
 	if output == "" && err != nil {
 		output = fmt.Sprintf("Terraform command failed: %v", err)
 	}
@@ -423,7 +426,7 @@ type planStatusUpdate struct {
 	completionTime *metav1.Time
 }
 
-func (r *PlanReconciler) updatePlanStatus(ctx context.Context, plan *tfreconcilev1alpha1.Plan, phase tfreconcilev1alpha1.PlanPhase, message string, update *planStatusUpdate) (ctrl.Result, error) {
+func (r *PlanReconciler) updatePlanStatus(ctx context.Context, plan *tfreconcilev1alpha1.Plan, phase tfreconcilev1alpha1.PlanPhase, message string, update *planStatusUpdate) error {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(plan), plan); err != nil {
 			return err
@@ -449,7 +452,7 @@ func (r *PlanReconciler) updatePlanStatus(ctx context.Context, plan *tfreconcile
 
 		return r.Client.Status().Update(ctx, plan)
 	})
-	return ctrl.Result{}, err
+	return err
 }
 
 func (r *PlanReconciler) alreadyProcessed(plan tfreconcilev1alpha1.Plan) bool {
@@ -459,7 +462,6 @@ func (r *PlanReconciler) alreadyProcessed(plan tfreconcilev1alpha1.Plan) bool {
 			(plan.Status.Phase == tfreconcilev1alpha1.PlanPhasePlanned && !plan.Spec.AutoApply))
 }
 
-// getEnvsForExecution is similar to the workspace controller version but works with workspace reference
 func (r *PlanReconciler) getEnvsForExecution(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (map[string]string, error) {
 	if ws.Spec.TFExec == nil {
 		return map[string]string{}, nil
@@ -609,6 +611,37 @@ func (r *PlanReconciler) canPlanRun(ctx context.Context, plan *tfreconcilev1alph
 	}
 
 	return true, nil
+}
+
+// formatValidationDiagnostics formats terraform validation diagnostics into a detailed error message
+func formatValidationDiagnostics(diagnostics []tfjson.Diagnostic) string {
+	diagnosticsMsg := "Terraform validation failed with the following diagnostics:\n\n"
+	for i, diag := range diagnostics {
+		diagnosticsMsg += fmt.Sprintf("Diagnostic %d:\n", i+1)
+		diagnosticsMsg += fmt.Sprintf("  Severity: %s\n", diag.Severity)
+		diagnosticsMsg += fmt.Sprintf("  Summary: %s\n", diag.Summary)
+
+		if diag.Detail != "" {
+			diagnosticsMsg += fmt.Sprintf("  Detail: %s\n", diag.Detail)
+		}
+
+		if diag.Range != nil {
+			diagnosticsMsg += fmt.Sprintf("  Location: %s:%d:%d\n",
+				diag.Range.Filename, diag.Range.Start.Line, diag.Range.Start.Column)
+		}
+
+		if diag.Snippet != nil {
+			if diag.Snippet.Context != nil {
+				diagnosticsMsg += fmt.Sprintf("  Context: %s\n", *diag.Snippet.Context)
+			}
+			if diag.Snippet.Code != "" {
+				diagnosticsMsg += fmt.Sprintf("  Code: %s\n", diag.Snippet.Code)
+			}
+		}
+
+		diagnosticsMsg += "\n"
+	}
+	return diagnosticsMsg
 }
 
 // SetupWithManager sets up the controller with the Manager.
