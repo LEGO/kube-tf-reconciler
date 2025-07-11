@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
@@ -73,7 +74,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	err := r.cancelOlderPlans(ctx, ws)
+	err := r.cancelAndDeleteOlderPlans(ctx, ws)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to cancel older plans: %w", err)
 	}
@@ -379,7 +380,7 @@ func (r *WorkspaceReconciler) dueForRefresh(t time.Time, ws tfreconcilev1alpha1.
 	return t.After(ws.Status.NextRefreshTimestamp.Time)
 }
 
-func (r *WorkspaceReconciler) cancelOlderPlans(ctx context.Context, ws tfreconcilev1alpha1.Workspace) error {
+func (r *WorkspaceReconciler) cancelAndDeleteOlderPlans(ctx context.Context, ws tfreconcilev1alpha1.Workspace) error {
 	log := logf.FromContext(ctx)
 
 	planList := &tfreconcilev1alpha1.PlanList{}
@@ -393,6 +394,7 @@ func (r *WorkspaceReconciler) cancelOlderPlans(ctx context.Context, ws tfreconci
 
 	currentPlanName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
 
+	//Cancel all older running or errored plans first
 	for i := range planList.Items {
 		plan := &planList.Items[i]
 
@@ -425,6 +427,37 @@ func (r *WorkspaceReconciler) cancelOlderPlans(ctx context.Context, ws tfreconci
 			})
 			if err != nil {
 				log.Error(err, "failed to cancel older plan", "plan", plan.Name)
+			}
+		}
+	}
+
+	// If there are more than 3 plans total, delete the oldest ones
+	if len(planList.Items) > 3 {
+
+		// Sort plans by creation timestamp (oldest first)
+		sort.Slice(planList.Items, func(i, j int) bool {
+			return planList.Items[i].CreationTimestamp.Time.Before(planList.Items[j].CreationTimestamp.Time)
+		})
+
+		// Calculate how many plans to delete (keep only 3)
+		plansToDelete := len(planList.Items) - 3
+
+		for i := 0; i < plansToDelete; i++ {
+			plan := &planList.Items[i]
+
+			if plan.Name == currentPlanName || plan.Spec.Destroy {
+				continue
+			}
+
+			if plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseApplied ||
+				plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseCancelled {
+
+				log.Info("deleting old plan to maintain limit of 3 plans", "plan", plan.Name, "phase", plan.Status.Phase)
+
+				err := r.Client.Delete(ctx, plan)
+				if err != nil {
+					log.Error(err, "failed to delete old plan", "plan", plan.Name)
+				}
 			}
 		}
 	}
