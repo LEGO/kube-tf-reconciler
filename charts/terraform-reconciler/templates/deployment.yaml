@@ -16,6 +16,7 @@ spec:
       serviceAccountName: {{ .Values.appName }}
       securityContext:
         runAsNonRoot: true
+        runAsUser: 999
       {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.imagePullSecrets | nindent 8 }}
