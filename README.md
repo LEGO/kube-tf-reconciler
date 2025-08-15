@@ -14,7 +14,7 @@ Features
 
 ## Usage
 
-To deploy the operator, the recommended approach is using the provided Helm chart under /charts/terraform-reconciller
+To deploy the operator, the recommended approach is using the provided Helm chart under /charts/terraform-reconciler
 
 After deploying the operator, get started by deploying a Workspace resource. A workspace is a completely self-contained Terraform execution environment, including the Terraform version, authentication, backend configuration, provider specifications, and module definitions.
 
@@ -61,7 +61,7 @@ spec:
 
 ### Authentication towards private module repositories
 
-If the Terraform module resides in a private repository (like a private GitHub repository), the workspace needs addditional environment variables to use for authentication.
+If the Terraform module resides in a private repository (like a private GitHub repository), the workspace needs additional environment variables to use for authentication.
 
 ```yaml
 apiVersion: tf-reconcile.lego.com/v1alpha1
