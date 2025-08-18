@@ -13,9 +13,9 @@ require (
 	github.com/stretchr/testify v1.10.0
 	github.com/zclconf/go-cty v1.16.3
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.33.2
+	k8s.io/api v0.33.4
 	k8s.io/apiextensions-apiserver v0.32.3
-	k8s.io/apimachinery v0.33.2
+	k8s.io/apimachinery v0.33.4
 	k8s.io/client-go v0.33.2
 	sigs.k8s.io/controller-runtime v0.20.4
 	sigs.k8s.io/e2e-framework v0.6.0
