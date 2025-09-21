@@ -95,6 +95,7 @@ func (e *Exec) TerraformInit(ctx context.Context, tf *tfexec.Terraform, opts ...
 	err := tf.Init(ctx, opts...)
 	return err
 }
+
 func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) (string, error) {
 	e.terraformInstallMutex.Lock()
 	defer e.terraformInstallMutex.Unlock()

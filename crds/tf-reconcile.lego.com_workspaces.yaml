@@ -242,6 +242,21 @@ spec:
               currentRender:
                 description: CurrentRender is the current render of the workspace
                 type: string
+              hasChanges:
+                description: HasChanges indicates whether the last plan contained
+                  changes
+                type: boolean
+              lastApplyOutput:
+                description: LastApplyOutput contains the raw terraform apply output
+                type: string
+              lastExecutionTime:
+                description: LastExecutionTime is the time the last terraform operation
+                  completed
+                format: date-time
+                type: string
+              lastPlanOutput:
+                description: LastPlanOutput contains the raw terraform plan output
+                type: string
               nextRefreshTimestamp:
                 description: NextRefreshTimestamp is the next time the workspace will
                   be refreshed
@@ -252,6 +267,15 @@ spec:
                   workspace
                 format: int64
                 type: integer
+              terraformMessage:
+                description: TerraformMessage provides details about the current terraform
+                  operation
+                type: string
+              terraformPhase:
+                description: |-
+                  Terraform execution status
+                  TerraformPhase represents the current terraform execution phase
+                type: string
               validRender:
                 description: ValidRender is the result of the validation of the workspace
                 type: boolean

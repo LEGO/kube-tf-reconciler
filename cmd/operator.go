@@ -68,12 +68,10 @@ var operatorCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		planReconciler := &controller.PlanReconciler{
+		planReconciler := &controller.SimplePlanReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
 			Recorder: mgr.GetEventRecorderFor("krec-plan"),
-
-			Tf: runner.New(cfg.WorkspacePath),
 		}
 
 		if err = planReconciler.SetupWithManager(mgr); err != nil {

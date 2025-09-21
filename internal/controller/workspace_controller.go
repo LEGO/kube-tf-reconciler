@@ -1,8 +1,11 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -10,10 +13,14 @@ import (
 	"github.com/LEGO/kube-tf-reconciler/pkg/render"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/hashicorp/hcl/v2/hclwrite"
+	"github.com/hashicorp/terraform-exec/tfexec"
+	tfjson "github.com/hashicorp/terraform-json"
+	authv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -24,12 +31,20 @@ import (
 )
 
 const (
-	TFErrEventReason     = "TerraformError"
-	TFPlanEventReason    = "TerraformPlan"
-	TFApplyEventReason   = "TerraformApply"
-	TFDestroyEventReason = "TerraformDestroy"
+	TFErrEventReason      = "TerraformError"
+	TFPlanEventReason     = "TerraformPlan"
+	TFApplyEventReason    = "TerraformApply"
+	TFDestroyEventReason  = "TerraformDestroy"
+	TFValidateEventReason = "TerraformValidate"
 
 	workspaceFinalizer = "tf-reconcile.lego.com/finalizer"
+
+	// Terraform execution phases
+	TFPhaseIdle      = ""
+	TFPhasePlanning  = "Planning"
+	TFPhaseApplying  = "Applying"
+	TFPhaseCompleted = "Completed"
+	TFPhaseErrored   = "Errored"
 )
 
 // WorkspaceReconciler reconciles a Workspace object
@@ -49,20 +64,18 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("failed to get workspace %s: %w", req.String(), err)
 		}
-
 		return ctrl.Result{}, nil
 	}
 
 	if r.dueForRefresh(reqStart, ws) {
-
+		// TODO: Implement refresh logic if needed
 	}
 
 	// Handle deletion first
 	if !ws.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&ws, workspaceFinalizer) {
-			return r.handleWorkspaceDeletion(ctx, &ws)
+			return handleWorkspaceDeletion(ctx, r, req, ws)
 		}
-
 		return ctrl.Result{}, nil
 	}
 
@@ -74,19 +87,23 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	err := r.cancelAndDeleteOlderPlans(ctx, ws)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to cancel older plans: %w", err)
-	}
-
 	needsNewPlan, err := r.needsNewPlan(ctx, ws)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to check if new plan is needed: %w", err)
 	}
 
-	if !needsNewPlan && r.alreadyProcessedOnce(ws) {
+	if !needsNewPlan || r.alreadyProcessedOnce(ws) {
 		log.Info("already processed workspace, skipping")
 		return ctrl.Result{}, nil
+	}
+
+	return planAndApplyWorkspace(ctx, r, req, ws, false)
+}
+
+func planAndApplyWorkspace(ctx context.Context, r *WorkspaceReconciler, req ctrl.Request, ws tfreconcilev1alpha1.Workspace, destroy bool) (ctrl.Result, error) {
+	err := r.cleanupOldPlans(ctx, ws)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to cleanup old plans: %w", err)
 	}
 
 	result, err := r.renderHclForWorkspace(ws)
@@ -105,28 +122,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status %s: %w", req.String(), err)
 	}
 
-	if needsNewPlan {
-		plan, err := r.createOrUpdatePlan(ctx, ws, string(result))
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to create or update plan: %w", err)
-		}
-
-		// Update workspace status with current plan reference
-		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
-				return err
-			}
-			ws.Status.CurrentPlan = &tfreconcilev1alpha1.PlanReference{
-				Name:      plan.Name,
-				Namespace: plan.Namespace,
-			}
-			ws.Status.ObservedGeneration = ws.Generation
-			return r.Client.Status().Update(ctx, &ws)
-		})
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{}, nil
+	return r.executeTerraform(ctx, &ws, string(result), destroy)
 }
 
 func (r *WorkspaceReconciler) renderHclForWorkspace(ws tfreconcilev1alpha1.Workspace) ([]byte, error) {
@@ -150,167 +146,23 @@ func (r *WorkspaceReconciler) renderHclForWorkspace(ws tfreconcilev1alpha1.Works
 	return f.Bytes(), nil
 }
 
-func (r *WorkspaceReconciler) createOrUpdatePlan(ctx context.Context, ws tfreconcilev1alpha1.Workspace, render string) (*tfreconcilev1alpha1.Plan, error) {
-	planName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
-
-	plan := &tfreconcilev1alpha1.Plan{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      planName,
-			Namespace: ws.Namespace,
-			Labels: map[string]string{
-				"tf-reconcile.lego.com/workspace": ws.Name,
-			},
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: ws.APIVersion,
-					Kind:       ws.Kind,
-					Name:       ws.Name,
-					UID:        ws.UID,
-					Controller: func(b bool) *bool { return &b }(true),
-				},
-			},
-		},
-		Spec: tfreconcilev1alpha1.PlanSpec{
-			WorkspaceRef: tfreconcilev1alpha1.WorkspaceReference{
-				Name:      ws.Name,
-				Namespace: ws.Namespace,
-			},
-			AutoApply:        ws.Spec.AutoApply,
-			TerraformVersion: ws.Spec.TerraformVersion,
-			Render:           render,
-		},
-	}
-
-	err := r.Client.Create(ctx, plan)
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("failed to create plan: %w", err)
-	}
-
-	if apierrors.IsAlreadyExists(err) {
-		existingPlan := &tfreconcilev1alpha1.Plan{}
-		err = r.Client.Get(ctx, client.ObjectKey{Name: planName, Namespace: ws.Namespace}, existingPlan)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get existing plan: %w", err)
-		}
-		return existingPlan, nil
-	}
-
-	return plan, nil
-}
-
-func (r *WorkspaceReconciler) handleWorkspaceDeletion(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error) {
+func handleWorkspaceDeletion(ctx context.Context, r *WorkspaceReconciler, req ctrl.Request, ws tfreconcilev1alpha1.Workspace) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Step 1: If preventDestroy is true, skip terraform destroy and go straight to cleanup
 	if ws.Spec.PreventDestroy {
 		log.Info("skipping terraform destroy due to the preventDestroy flag")
-		r.Recorder.Eventf(ws, v1.EventTypeNormal, "DestroyPrevented",
+		r.Recorder.Eventf(&ws, v1.EventTypeNormal, "DestroyPrevented",
 			"Terraform destroy skipped due to preventDestroy")
-		return r.cleanupWorkspaceAndFinalize(ctx, ws)
+		return r.cleanupWorkspaceAndFinalize(ctx, &ws)
 	}
 
-	// Step 1.5: Check if destroy has already been completed (to prevent creating multiple destroy plans)
+	// check if destroy has already been completed
 	if ws.Annotations != nil && ws.Annotations["tf-reconcile.lego.com/destroy-completed"] == "true" {
 		log.Info("destroy already completed, proceeding to cleanup")
-		return r.cleanupWorkspaceAndFinalize(ctx, ws)
+		return r.cleanupWorkspaceAndFinalize(ctx, &ws)
 	}
 
-	// Step 2: Check if we have a destroy plan in progress
-	destroyPlan, err := r.getDestroyPlan(ctx, *ws)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to check for destroy plan: %w", err)
-	}
-
-	// Step 3: If no destroy plan exists, create one
-	if destroyPlan == nil {
-		err := r.createDestroyPlan(ctx, *ws)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to create destroy plan: %w", err)
-		}
-
-		log.Info("created destroy plan for workspace deletion")
-		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFDestroyEventReason, "Created destroy plan for workspace deletion")
-
-		return ctrl.Result{RequeueAfter: time.Second * 20}, nil
-	}
-
-	// Step 4: Check destroy plan status
-	if destroyPlan.Status.Phase == tfreconcilev1alpha1.PlanPhaseApplied {
-		log.Info("destroy plan completed successfully")
-		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFDestroyEventReason, "Successfully destroyed resources")
-
-		// Mark destroy as completed to prevent race conditions
-		err := r.markDestroyCompleted(ctx, ws)
-		if err != nil {
-			log.Error(err, "failed to mark destroy as completed, but proceeding with cleanup")
-		}
-
-		return r.cleanupWorkspaceAndFinalize(ctx, ws)
-
-	} else {
-		log.Info("waiting for destroy plan to complete", "phase", destroyPlan.Status.Phase)
-		return ctrl.Result{RequeueAfter: time.Second * 20}, nil
-	}
-}
-
-func (r *WorkspaceReconciler) getDestroyPlan(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (*tfreconcilev1alpha1.Plan, error) {
-	planList := &tfreconcilev1alpha1.PlanList{}
-	err := r.Client.List(ctx, planList,
-		client.InNamespace(ws.Namespace),
-		client.MatchingLabels{
-			"tf-reconcile.lego.com/workspace": ws.Name,
-			"tf-reconcile.lego.com/destroy":   "true",
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list destroy plans for workspace: %w", err)
-	}
-
-	var latestDestroyPlan *tfreconcilev1alpha1.Plan
-	for i := range planList.Items {
-		plan := &planList.Items[i]
-		if latestDestroyPlan == nil || plan.CreationTimestamp.After(latestDestroyPlan.CreationTimestamp.Time) {
-			latestDestroyPlan = plan
-		}
-	}
-
-	return latestDestroyPlan, nil
-}
-
-func (r *WorkspaceReconciler) createDestroyPlan(ctx context.Context, ws tfreconcilev1alpha1.Workspace) error {
-	// Use the current workspace render state for the destroy plan
-	// This ensures we destroy based on the most recent workspace configuration
-	render, err := r.renderHclForWorkspace(ws)
-	if err != nil {
-		return fmt.Errorf("failed to render workspace for destroy plan: %w", err)
-	}
-
-	destroyPlanName := fmt.Sprintf("%s-destroy-%d", ws.Name, time.Now().Unix())
-
-	destroyPlan := &tfreconcilev1alpha1.Plan{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      destroyPlanName,
-			Namespace: ws.Namespace,
-			Labels: map[string]string{
-				"tf-reconcile.lego.com/workspace": ws.Name,
-				"tf-reconcile.lego.com/destroy":   "true",
-			},
-			// Don't set owner reference for destroy plans so they can complete
-			// even after the workspace is deleted
-		},
-		Spec: tfreconcilev1alpha1.PlanSpec{
-			WorkspaceRef: tfreconcilev1alpha1.WorkspaceReference{
-				Name:      ws.Name,
-				Namespace: ws.Namespace,
-			},
-			AutoApply:        true,
-			TerraformVersion: ws.Spec.TerraformVersion,
-			Render:           string(render),
-			Destroy:          true,
-		},
-	}
-
-	return r.Client.Create(ctx, destroyPlan)
+	return planAndApplyWorkspace(ctx, r, req, ws, true)
 }
 
 func (r *WorkspaceReconciler) cleanupWorkspaceAndFinalize(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error) {
@@ -325,8 +177,6 @@ func (r *WorkspaceReconciler) cleanupWorkspaceAndFinalize(ctx context.Context, w
 		return ctrl.Result{}, fmt.Errorf("failed to list plans for cleanup: %w", err)
 	}
 
-	// First pass: Mark all plans for deletion if they're not already being deleted
-	plansToDelete := len(planList.Items) > 0
 	for i := range planList.Items {
 		plan := &planList.Items[i]
 		if plan.DeletionTimestamp.IsZero() { // Only delete if not already being deleted
@@ -336,12 +186,6 @@ func (r *WorkspaceReconciler) cleanupWorkspaceAndFinalize(ctx context.Context, w
 			}
 			log.Info("marked plan for deletion", "plan", plan.Name)
 		}
-	}
-
-	// If we just marked plans for deletion, requeue to wait for them to be actually deleted
-	if plansToDelete {
-		log.Info("waiting for plans to be deleted before finalizing workspace")
-		return ctrl.Result{RequeueAfter: time.Second * 20}, nil
 	}
 
 	err = r.Tf.CleanupWorkspace(*ws)
@@ -364,23 +208,28 @@ func (r *WorkspaceReconciler) cleanupWorkspaceAndFinalize(ctx context.Context, w
 func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&tfreconcilev1alpha1.Workspace{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 10}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 5}). // Match terraform execution capacity
 		Complete(r)
 }
 
 func (r *WorkspaceReconciler) alreadyProcessedOnce(ws tfreconcilev1alpha1.Workspace) bool {
-	// A workspace is considered processed if:
-	// 1. ObservedGeneration matches Generation (resource hasn't changed)
-	// 2. AND it has been actually processed (has CurrentRender set)
-	// This prevents skipping newly created workspaces that haven't been processed yet
-	return ws.Status.ObservedGeneration == ws.Generation && ws.Status.CurrentRender != ""
-}
+	if ws.Status.ObservedGeneration != ws.Generation || ws.Status.CurrentRender == "" {
+		return false
+	}
 
+	// Check if the current render would be the same
+	newRender, err := r.renderHclForWorkspace(ws)
+	if err != nil {
+		return false
+	}
+
+	return ws.Status.CurrentRender == string(newRender)
+}
 func (r *WorkspaceReconciler) dueForRefresh(t time.Time, ws tfreconcilev1alpha1.Workspace) bool {
 	return t.After(ws.Status.NextRefreshTimestamp.Time)
 }
 
-func (r *WorkspaceReconciler) cancelAndDeleteOlderPlans(ctx context.Context, ws tfreconcilev1alpha1.Workspace) error {
+func (r *WorkspaceReconciler) cleanupOldPlans(ctx context.Context, ws tfreconcilev1alpha1.Workspace) error {
 	log := logf.FromContext(ctx)
 
 	planList := &tfreconcilev1alpha1.PlanList{}
@@ -392,73 +241,30 @@ func (r *WorkspaceReconciler) cancelAndDeleteOlderPlans(ctx context.Context, ws 
 		return fmt.Errorf("failed to list plans for workspace: %w", err)
 	}
 
-	currentPlanName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
+	// Clean up old completed plans (keep only 3 most recent)
+	if len(planList.Items) <= 3 {
+		return nil
+	}
 
-	//Cancel all older running or errored plans first
-	for i := range planList.Items {
+	sort.Slice(planList.Items, func(i, j int) bool {
+		return planList.Items[i].CreationTimestamp.Time.Before(planList.Items[j].CreationTimestamp.Time)
+	})
+
+	currentPlanName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
+	plansToDelete := len(planList.Items) - 3
+
+	for i := 0; i < plansToDelete; i++ {
 		plan := &planList.Items[i]
 
 		if plan.Name == currentPlanName || plan.Spec.Destroy {
 			continue
 		}
 
-		// Skip if already in a truly terminal state (applied or cancelled)
-		// Note: Errored plans are NOT skipped because they retry automatically
-		if plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseApplied ||
-			plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseCancelled {
-			continue
-		}
+		log.Info("deleting old plan audit record", "plan", plan.Name, "phase", plan.Status.Phase)
 
-		// Cancel the plan if it's running or errored
-		if plan.Status.Phase == tfreconcilev1alpha1.PlanPhasePlanning ||
-			plan.Status.Phase == tfreconcilev1alpha1.PlanPhasePlanned ||
-			plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseErrored {
-
-			log.Info("cancelling older plan", "plan", plan.Name, "currentPhase", plan.Status.Phase)
-
-			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				if err := r.Client.Get(ctx, client.ObjectKeyFromObject(plan), plan); err != nil {
-					return err
-				}
-				plan.Status.Phase = tfreconcilev1alpha1.PlanPhaseCancelled
-				plan.Status.Message = "Plan cancelled - newer plan exists for workspace"
-				plan.Status.ObservedGeneration = plan.Generation // Mark as processed to prevent restart
-				return r.Client.Status().Update(ctx, plan)
-			})
-			if err != nil {
-				log.Error(err, "failed to cancel older plan", "plan", plan.Name)
-			}
-		}
-	}
-
-	// If there are more than 3 plans total, delete the oldest ones
-	if len(planList.Items) > 3 {
-
-		// Sort plans by creation timestamp (oldest first)
-		sort.Slice(planList.Items, func(i, j int) bool {
-			return planList.Items[i].CreationTimestamp.Time.Before(planList.Items[j].CreationTimestamp.Time)
-		})
-
-		// Calculate how many plans to delete (keep only 3)
-		plansToDelete := len(planList.Items) - 3
-
-		for i := 0; i < plansToDelete; i++ {
-			plan := &planList.Items[i]
-
-			if plan.Name == currentPlanName || plan.Spec.Destroy {
-				continue
-			}
-
-			if plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseApplied ||
-				plan.Status.Phase == tfreconcilev1alpha1.PlanPhaseCancelled {
-
-				log.Info("deleting old plan to maintain limit of 3 plans", "plan", plan.Name, "phase", plan.Status.Phase)
-
-				err := r.Client.Delete(ctx, plan)
-				if err != nil {
-					log.Error(err, "failed to delete old plan", "plan", plan.Name)
-				}
-			}
+		err := r.Client.Delete(ctx, plan)
+		if err != nil {
+			log.Error(err, "failed to delete old plan audit record", "plan", plan.Name)
 		}
 	}
 
@@ -502,4 +308,501 @@ func (r *WorkspaceReconciler) markDestroyCompleted(ctx context.Context, ws *tfre
 	ws.Annotations["tf-reconcile.lego.com/destroy-completed"] = "true"
 
 	return r.Update(ctx, ws)
+}
+
+// executes terraform plan/apply inline and creates a Plan CRD as audit record
+func (r *WorkspaceReconciler) executeTerraform(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, render string, destroy bool) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	err := r.updateWorkspaceStatus(ctx, ws, TFPhasePlanning, "Starting terraform plan", nil)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to update workspace status: %w", err)
+	}
+
+	envs, err := r.getEnvsForExecution(ctx, *ws)
+	if err != nil {
+		r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to get envs for execution: %v", err), nil)
+		return ctrl.Result{}, err
+	}
+
+	cleanup := func() {
+		if tempTokenPath, exists := envs["AWS_WEB_IDENTITY_TOKEN_FILE"]; exists {
+			if err := os.Remove(tempTokenPath); err != nil {
+				log.Error(err, "failed to cleanup temp token file", "file", tempTokenPath)
+			}
+		}
+	}
+	defer cleanup()
+
+	tf, terraformRCPath, err := r.Tf.GetTerraformForWorkspace(ctx, *ws)
+	if err != nil {
+		r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to get terraform executable: %v", err), nil)
+		return ctrl.Result{}, err
+	}
+
+	envs["HOME"] = os.Getenv("HOME")
+	envs["PATH"] = os.Getenv("PATH")
+	envs["TF_PLUGIN_CACHE_DIR"] = r.Tf.PluginCacheDir
+	envs["TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE"] = "true"
+
+	if terraformRCPath != "" {
+		envs["TF_CLI_CONFIG_FILE"] = terraformRCPath
+	}
+
+	err = tf.SetEnv(envs)
+	if err != nil {
+		r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to set terraform env: %v", err), nil)
+		return ctrl.Result{}, err
+	}
+
+	err = r.writeHclContent(tf.WorkingDir(), render)
+	if err != nil {
+		r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to write HCL content: %v", err), nil)
+		return ctrl.Result{}, err
+	}
+
+	err = r.Tf.TerraformInit(ctx, tf)
+	if err != nil {
+		log.Error(err, "failed to init terraform", "workspace", ws.Name)
+		r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to init terraform: %v", err), nil)
+		return ctrl.Result{}, err
+	}
+
+	valResult, err := tf.Validate(ctx)
+	if err != nil {
+		log.Error(err, "failed to validate terraform", "workspace", ws.Name)
+		r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to validate terraform: %v", err), nil)
+		return ctrl.Result{}, err
+	}
+
+	r.Recorder.Eventf(ws, v1.EventTypeNormal, TFValidateEventReason, "Terraform validation completed, valid: %t", valResult.Valid)
+
+	if !valResult.Valid {
+		log.Error(err, "Terraform validation failed", "workspace", ws.Name)
+		diagnosticsMsg := r.formatValidationDiagnostics(valResult.Diagnostics)
+		r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, diagnosticsMsg, nil)
+		return ctrl.Result{}, fmt.Errorf("terraform validation failed: %s", diagnosticsMsg)
+	}
+
+	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, destroy)
+	if err != nil {
+		log.Error(err, "failed to execute terraform plan", "workspace", ws.Name)
+		r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to execute terraform plan: %v", err), nil)
+		return ctrl.Result{}, err
+	}
+
+	log.Info("terraform plan completed", "workspace", ws.Name, "changes", changed)
+	r.Recorder.Eventf(ws, v1.EventTypeNormal, TFPlanEventReason, "Terraform plan completed, changes: %t", changed)
+
+	var applyOutput string
+	if ws.Spec.AutoApply {
+		if !changed {
+			log.Info("plan has no changes, marking as completed", "workspace", ws.Name)
+			now := metav1.NewTime(time.Now())
+			err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan completed - no changes needed", &workspaceStatusUpdate{
+				hasChanges:     false,
+				planOutput:     planOutput,
+				completionTime: &now,
+			})
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		} else {
+			err = r.updateWorkspaceStatus(ctx, ws, TFPhaseApplying, "Applying terraform changes", nil)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to update workspace status: %w", err)
+			}
+
+			applyOutput, err = r.executeTerraformApply(ctx, tf, destroy)
+			if err != nil {
+				log.Error(err, "failed to apply terraform", "workspace", ws.Name)
+				r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to apply terraform: %v", err), &workspaceStatusUpdate{
+					hasChanges:  changed,
+					planOutput:  planOutput,
+					applyOutput: applyOutput,
+				})
+
+				plan, planErr := r.createPlanRecord(ctx, *ws, render, changed, planOutput, applyOutput, false, destroy)
+				if planErr != nil {
+					log.Error(planErr, "failed to create plan audit record for failed apply", "workspace", ws.Name)
+				} else if plan != nil {
+					retry.RetryOnConflict(retry.DefaultRetry, func() error {
+						if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+							return err
+						}
+						ws.Status.CurrentPlan = &tfreconcilev1alpha1.PlanReference{
+							Name:      plan.Name,
+							Namespace: plan.Namespace,
+						}
+						return r.Client.Status().Update(ctx, ws)
+					})
+				}
+
+				return ctrl.Result{}, err
+			}
+
+			log.Info("terraform apply completed successfully", "workspace", ws.Name)
+			r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "Terraform apply completed successfully")
+
+			now := metav1.NewTime(time.Now())
+			err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Apply completed successfully", &workspaceStatusUpdate{
+				hasChanges:     changed,
+				planOutput:     planOutput,
+				applyOutput:    applyOutput,
+				completionTime: &now,
+			})
+			if destroy == true {
+				// If this was a destroy operation, mark destroy as completed
+				err = r.markDestroyCompleted(ctx, ws)
+			}
+
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	} else {
+		// Plan completed but no auto-apply
+		now := metav1.NewTime(time.Now())
+		err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan completed successfully", &workspaceStatusUpdate{
+			hasChanges:     changed,
+			planOutput:     planOutput,
+			completionTime: &now,
+		})
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Create Plan as audit record after successful execution
+	plan, err := r.createPlanRecord(ctx, *ws, render, changed, planOutput, applyOutput, ws.Spec.AutoApply && changed, destroy)
+	if err != nil {
+		log.Error(err, "failed to create plan audit record", "workspace", ws.Name)
+		// Don't fail the reconciliation if we can't create the audit record
+	}
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+		if plan != nil {
+			ws.Status.CurrentPlan = &tfreconcilev1alpha1.PlanReference{
+				Name:      plan.Name,
+				Namespace: plan.Namespace,
+			}
+		}
+		ws.Status.ObservedGeneration = ws.Generation
+		return r.Client.Status().Update(ctx, ws)
+	})
+
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to update workspace observed generation: %w", err)
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *WorkspaceReconciler) executeTerraformPlan(ctx context.Context, tf *tfexec.Terraform, destroy bool) (bool, string, error) {
+	var changed bool
+	var err error
+
+	changed, err = tf.Plan(ctx, tfexec.Destroy(destroy), tfexec.Out("plan.out"))
+
+	if err != nil {
+		return false, "", fmt.Errorf("failed to plan terraform: %w", err)
+	}
+
+	planOutput, err := tf.ShowPlanFileRaw(ctx, "plan.out")
+	if err != nil {
+		return false, "", fmt.Errorf("failed to show plan file: %w", err)
+	}
+
+	return changed, planOutput, nil
+}
+
+// executeTerraformApply executes the terraform apply or destroy command
+func (r *WorkspaceReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.Terraform, destroy bool) (string, error) {
+	var stdout, stderr bytes.Buffer
+	tf.SetStdout(&stdout)
+	tf.SetStderr(&stderr)
+
+	var err error
+	if destroy {
+		err = tf.Destroy(ctx)
+	} else {
+		err = tf.Apply(ctx)
+	}
+
+	return constructOutput(stdout, stderr, err)
+}
+
+func constructOutput(stdout, stderr bytes.Buffer, err error) (string, error) {
+	var output string
+	if stdout.Len() > 0 {
+		output += "=== TERRAFORM OUTPUT ===\n"
+		output += stdout.String()
+	}
+
+	if stderr.Len() > 0 {
+		if output != "" {
+			output += "\n"
+		}
+		output += "=== TERRAFORM DIAGNOSTICS ===\n"
+		output += stderr.String()
+	}
+
+	if err != nil && output != "" {
+		output += "\n=== ERROR DETAILS ===\n"
+		output += fmt.Sprintf("Exit error: %v", err)
+	}
+
+	if output == "" && err != nil {
+		output = fmt.Sprintf("Terraform command failed: %v", err)
+	}
+
+	return output, err
+}
+
+// writeHclContent writes HCL content to the terraform working directory
+func (r *WorkspaceReconciler) writeHclContent(workspaceDir, content string) error {
+	return os.WriteFile(filepath.Join(workspaceDir, "main.tf"), []byte(content), 0644)
+}
+
+type workspaceStatusUpdate struct {
+	hasChanges     bool
+	planOutput     string
+	applyOutput    string
+	completionTime *metav1.Time
+}
+
+// updateWorkspaceStatus updates the terraform execution status in the workspace
+func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, phase string, message string, update *workspaceStatusUpdate) error {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+
+		ws.Status.TerraformPhase = phase
+		ws.Status.TerraformMessage = message
+
+		if update != nil {
+			if update.completionTime != nil {
+				ws.Status.LastExecutionTime = update.completionTime
+			}
+			ws.Status.HasChanges = update.hasChanges
+			if update.planOutput != "" {
+				ws.Status.LastPlanOutput = update.planOutput
+			}
+			if update.applyOutput != "" {
+				ws.Status.LastApplyOutput = update.applyOutput
+			}
+		}
+
+		return r.Client.Status().Update(ctx, ws)
+	})
+	return err
+}
+
+// createPlanRecord creates a Plan CRD as an audit record after terraform execution
+func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws tfreconcilev1alpha1.Workspace, render string, hasChanges bool, planOutput, applyOutput string, wasApplied bool, destroy bool) (*tfreconcilev1alpha1.Plan, error) {
+	planName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
+
+	phase := tfreconcilev1alpha1.PlanPhasePlanned
+	message := "Plan completed"
+	if wasApplied {
+		phase = tfreconcilev1alpha1.PlanPhaseApplied
+		message = "Plan completed and applied"
+	} else if applyOutput != "" {
+		// If there's apply output but wasApplied is false, it means apply failed
+		phase = tfreconcilev1alpha1.PlanPhaseErrored
+		message = "Plan completed but apply failed"
+	}
+
+	now := metav1.NewTime(time.Now())
+	plan := &tfreconcilev1alpha1.Plan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      planName,
+			Namespace: ws.Namespace,
+			Labels: map[string]string{
+				"tf-reconcile.lego.com/workspace": ws.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: ws.APIVersion,
+					Kind:       ws.Kind,
+					Name:       ws.Name,
+					UID:        ws.UID,
+					Controller: func(b bool) *bool { return &b }(true),
+				},
+			},
+		},
+		Spec: tfreconcilev1alpha1.PlanSpec{
+			WorkspaceRef: tfreconcilev1alpha1.WorkspaceReference{
+				Name:      ws.Name,
+				Namespace: ws.Namespace,
+			},
+			AutoApply:        ws.Spec.AutoApply,
+			TerraformVersion: ws.Spec.TerraformVersion,
+			Render:           render,
+			Destroy:          destroy,
+		},
+	}
+
+	err := r.Client.Create(ctx, plan)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("failed to create plan audit record: %w", err)
+	}
+
+	// The plan status must be updated in a separate call
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: planName, Namespace: ws.Namespace}, plan); err != nil {
+			return err
+		}
+
+		// Update the status with the latest outputs
+		plan.Status = tfreconcilev1alpha1.PlanStatus{
+			Phase:              phase,
+			Message:            message,
+			PlanOutput:         planOutput,
+			ApplyOutput:        applyOutput,
+			HasChanges:         hasChanges,
+			ValidRender:        true,
+			StartTime:          &now,
+			CompletionTime:     &now,
+			ObservedGeneration: 1,
+		}
+
+		return r.Client.Status().Update(ctx, plan)
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to update plan status: %w", err)
+	}
+	return plan, nil
+}
+
+// getEnvsForExecution gets environment variables for terraform execution
+func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (map[string]string, error) {
+	if ws.Spec.TFExec == nil {
+		return map[string]string{}, nil
+	}
+	if ws.Spec.TFExec.Env == nil {
+		return map[string]string{}, nil
+	}
+	envs := make(map[string]string)
+	for _, env := range ws.Spec.TFExec.Env {
+		if env.Name == "" {
+			continue
+		}
+		if env.Value != "" {
+			envs[env.Name] = env.Value
+			continue
+		}
+		if env.ConfigMapKeyRef != nil {
+			var cm v1.ConfigMap
+			err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: env.ConfigMapKeyRef.Name}, &cm)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get configmap %s: %w", env.ConfigMapKeyRef.Name, err)
+			}
+			if val, ok := cm.Data[env.ConfigMapKeyRef.Key]; ok {
+				envs[env.Name] = val
+				continue
+			}
+		}
+		if env.SecretKeyRef != nil {
+			var secret v1.Secret
+			err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: env.SecretKeyRef.Name}, &secret)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get secret %s: %w", env.SecretKeyRef.Name, err)
+			}
+			if val, ok := secret.Data[env.SecretKeyRef.Key]; ok {
+				envs[env.Name] = string(val)
+				continue
+			}
+		}
+	}
+
+	// Handle AWS authentication with service account tokens
+	if ws.Spec.Authentication != nil {
+		if ws.Spec.Authentication.AWS != nil {
+			if ws.Spec.Authentication.AWS.ServiceAccountName != "" || ws.Spec.Authentication.AWS.RoleARN != "" {
+				tempTokenPath, err := r.setupAWSAuthentication(ctx, ws)
+				if err != nil {
+					return nil, fmt.Errorf("failed to setup AWS authentication: %w", err)
+				}
+
+				envs["AWS_WEB_IDENTITY_TOKEN_FILE"] = tempTokenPath
+				envs["AWS_ROLE_ARN"] = ws.Spec.Authentication.AWS.RoleARN
+			}
+		}
+	}
+
+	return envs, nil
+}
+
+// setupAWSAuthentication creates temporary AWS token file for authentication
+func (r *WorkspaceReconciler) setupAWSAuthentication(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (string, error) {
+	var sa v1.ServiceAccount
+	err := r.Client.Get(ctx, types.NamespacedName{
+		Namespace: ws.Namespace,
+		Name:      ws.Spec.Authentication.AWS.ServiceAccountName,
+	}, &sa)
+	if err != nil {
+		return "", fmt.Errorf("failed to get service account %s in namespace %s: %w",
+			ws.Spec.Authentication.AWS.ServiceAccountName, ws.Namespace, err)
+	}
+
+	tokenRequest := &authv1.TokenRequest{
+		Spec: authv1.TokenRequestSpec{
+			ExpirationSeconds: func(i int64) *int64 { return &i }(600),
+		},
+	}
+
+	err = r.Client.SubResource("token").Create(ctx, &sa, tokenRequest)
+	if err != nil {
+		return "", fmt.Errorf("failed to create token for service account %s: %w",
+			ws.Spec.Authentication.AWS.ServiceAccountName, err)
+	}
+	tokenFile, err := os.CreateTemp("", fmt.Sprintf("aws-token-%s-%s-*", ws.Namespace, ws.Name))
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp token file: %w", err)
+	}
+	defer tokenFile.Close()
+
+	if _, err := tokenFile.Write([]byte(tokenRequest.Status.Token)); err != nil {
+		os.Remove(tokenFile.Name())
+		return "", fmt.Errorf("failed to write token to temp file: %w", err)
+	}
+
+	return tokenFile.Name(), nil
+}
+
+// formatValidationDiagnostics formats terraform validation diagnostics into a detailed error message
+func (r *WorkspaceReconciler) formatValidationDiagnostics(diagnostics []tfjson.Diagnostic) string {
+	diagnosticsMsg := "Terraform validation failed with the following diagnostics:\n\n"
+	for i, diag := range diagnostics {
+		diagnosticsMsg += fmt.Sprintf("Diagnostic %d:\n", i+1)
+		diagnosticsMsg += fmt.Sprintf("  Severity: %s\n", diag.Severity)
+		diagnosticsMsg += fmt.Sprintf("  Summary: %s\n", diag.Summary)
+
+		if diag.Detail != "" {
+			diagnosticsMsg += fmt.Sprintf("  Detail: %s\n", diag.Detail)
+		}
+
+		if diag.Range != nil {
+			diagnosticsMsg += fmt.Sprintf("  Location: %s:%d:%d\n",
+				diag.Range.Filename, diag.Range.Start.Line, diag.Range.Start.Column)
+		}
+
+		if diag.Snippet != nil {
+			if diag.Snippet.Context != nil {
+				diagnosticsMsg += fmt.Sprintf("  Context: %s\n", *diag.Snippet.Context)
+			}
+			if diag.Snippet.Code != "" {
+				diagnosticsMsg += fmt.Sprintf("  Code: %s\n", diag.Snippet.Code)
+			}
+		}
+
+		diagnosticsMsg += "\n"
+	}
+	return diagnosticsMsg
 }

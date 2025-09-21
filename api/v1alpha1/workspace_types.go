@@ -172,6 +172,26 @@ type WorkspaceStatus struct {
 	NextRefreshTimestamp metav1.Time `json:"nextRefreshTimestamp"`
 	// ObservedGeneration is the observed generation of the workspace
 	ObservedGeneration int64 `json:"observedGeneration"`
+
+	// Terraform execution status
+	// TerraformPhase represents the current terraform execution phase
+	// +kubebuilder:validation:Optional
+	TerraformPhase string `json:"terraformPhase,omitempty"`
+	// TerraformMessage provides details about the current terraform operation
+	// +kubebuilder:validation:Optional
+	TerraformMessage string `json:"terraformMessage,omitempty"`
+	// HasChanges indicates whether the last plan contained changes
+	// +kubebuilder:validation:Optional
+	HasChanges bool `json:"hasChanges"`
+	// LastExecutionTime is the time the last terraform operation completed
+	// +kubebuilder:validation:Optional
+	LastExecutionTime *metav1.Time `json:"lastExecutionTime,omitempty"`
+	// LastPlanOutput contains the raw terraform plan output
+	// +kubebuilder:validation:Optional
+	LastPlanOutput string `json:"lastPlanOutput,omitempty"`
+	// LastApplyOutput contains the raw terraform apply output
+	// +kubebuilder:validation:Optional
+	LastApplyOutput string `json:"lastApplyOutput,omitempty"`
 }
 
 // PlanReference contains a reference to a Plan resource
