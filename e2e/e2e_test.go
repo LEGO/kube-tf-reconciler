@@ -48,7 +48,7 @@ func TestE2E(t *testing.T) {
 	assert.NoError(t, err)
 
 	err = testutils.RunHelmInstall(k.GetKubeconfig(),
-		helm.WithChart(filepath.Join(testutils.RootFolder(), "charts", "krec")),
+		helm.WithChart(filepath.Join(testutils.RootFolder(), "charts", "terraform-reconciler")),
 		helm.WithNamespace(operatorNs),
 		helm.WithArgs("--set image.tag=latest"),
 		helm.WithArgs("--set podSecurityContext.runAsUser=9000"),
