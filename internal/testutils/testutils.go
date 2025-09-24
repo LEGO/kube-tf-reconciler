@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	rt "runtime"
+	"strings"
+	"testing"
 	"time"
 
 	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
@@ -46,15 +48,14 @@ func CRDFolder() string {
 	return filepath.Join(RootFolder(), "crds")
 }
 
-func DockerCmd(args ...string) error {
+func DockerCmdContext(ctx context.Context, args ...string) error {
 	// Build the operator image
-	cmd := exec.Command("docker", args...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	// output to stdout
 	err := cmd.Run()
 	out, _ := cmd.CombinedOutput()
-	log.Printf("output: %s", out)
 	if err != nil {
-		return fmt.Errorf("failed to run docker command: %w", err)
+		return fmt.Errorf("failed to run docker command: %w: %s", err, out)
 	}
 	return nil
 }
@@ -68,22 +69,23 @@ func RunHelmInstall(kubeconfig string, opt ...helm.Option) error {
 	return nil
 }
 
-func RunHelmUninstall(kubeconfig string, name string) error {
+func RunHelmUninstall(kubeconfig string, opt ...helm.Option) error {
 	h := helm.New(kubeconfig)
-	err := h.RunUninstall(helm.WithName(name))
+	err := h.RunUninstall(opt...)
 	if err != nil {
 		return fmt.Errorf("failed to run helm uninstall: %w", err)
 	}
 	return nil
 }
 
-func GetGitSHA() string {
-	cmd := exec.Command("git", "rev-parse", "HEAD")
+func GetGitSHAContext(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return ""
 	}
-	return string(out)
+
+	return strings.Trim(string(out), "\n")
 }
 
 // PrintPodLogs prints the logs of the first pod that matches the label selector
@@ -175,12 +177,23 @@ func TeardownCRDs(c klient.Client, ctx context.Context, crdPath, pattern string)
 }
 
 func CreateNamespace(c klient.Client, ctx context.Context, name string, opts ...envfuncs.CreateNamespaceOpts) error {
-	namespace := corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	for _, opt := range opts {
-		opt(c, &namespace)
+		opt(c, namespace)
 	}
-	if err := c.Resources().Create(ctx, &namespace); err != nil {
+	if err := c.Resources().Create(ctx, namespace); err != nil {
 		return fmt.Errorf("create namespace func: %w", err)
+	}
+	return nil
+}
+
+func DeleteNamespace(c klient.Client, ctx context.Context, name string, opts ...envfuncs.CreateNamespaceOpts) error {
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	for _, opt := range opts {
+		opt(c, namespace)
+	}
+	if err := c.Resources().Delete(ctx, namespace); err != nil {
+		return fmt.Errorf("delete namespace func: %w", err)
 	}
 	return nil
 }
@@ -199,4 +212,17 @@ func WsCurrentGeneration(object k8s.Object) bool {
 		return false
 	}
 	return workspace.Generation == workspace.Status.ObservedGeneration
+}
+
+func IntegrationTest(t *testing.T) {
+	t.Helper()
+
+	args := strings.Join(os.Args, " ")
+	if strings.Contains(args, t.Name()) {
+		return
+	}
+
+	if os.Getenv("INTEGRATION") == "" {
+		t.Skip("skipping integration tests, set environment variable INTEGRATION")
+	}
 }
