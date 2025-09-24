@@ -26,6 +26,7 @@ import (
 
 func TestWorkspaceController(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{testutils.CRDFolder()},
