@@ -42,6 +42,7 @@ func TestWorkspaceController(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, cfg)
 	k8sClient, err := client.New(cfg, client.Options{Scheme: testEnv.Scheme})
+	assert.NoError(t, err)
 	k, err := klient.New(cfg)
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
