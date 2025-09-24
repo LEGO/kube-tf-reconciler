@@ -6,6 +6,7 @@ import (
 
 	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
 	"github.com/LEGO/kube-tf-reconciler/internal/controller"
+	"github.com/LEGO/kube-tf-reconciler/pkg/render"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
@@ -60,7 +61,8 @@ var operatorCmd = &cobra.Command{
 			Scheme:   mgr.GetScheme(),
 			Recorder: mgr.GetEventRecorderFor("krec"),
 
-			Tf: runner.New(cfg.WorkspacePath),
+			Tf:       runner.New(cfg.WorkspacePath),
+			Renderer: render.NewFileRender(cfg.WorkspacePath),
 		}
 
 		if err = reconciler.SetupWithManager(mgr); err != nil {

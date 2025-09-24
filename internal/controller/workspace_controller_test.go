@@ -2,27 +2,33 @@ package controller
 
 import (
 	"context"
-	"path/filepath"
+	"fmt"
 	"testing"
+	"time"
 
 	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
 	"github.com/LEGO/kube-tf-reconciler/internal/testutils"
+	"github.com/LEGO/kube-tf-reconciler/pkg/render"
+	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/stretchr/testify/assert"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/e2e-framework/klient"
+	"sigs.k8s.io/e2e-framework/klient/k8s"
+	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
+	"sigs.k8s.io/e2e-framework/klient/wait"
+	"sigs.k8s.io/e2e-framework/klient/wait/conditions"
 )
 
 func TestWorkspaceController(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.TODO())
-	defer cancel()
+	ctx, cancel := context.WithCancel(t.Context())
 
 	testEnv := &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "crds")},
+		CRDDirectoryPaths:     []string{testutils.CRDFolder()},
 		BinaryAssetsDirectory: testutils.GetFirstFoundEnvTestBinaryDir(),
 		ErrorIfCRDPathMissing: true,
 		Scheme:                k8sscheme.Scheme,
@@ -35,43 +41,83 @@ func TestWorkspaceController(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, cfg)
 	k8sClient, err := client.New(cfg, client.Options{Scheme: testEnv.Scheme})
+	k, err := klient.New(cfg)
 
-	const resourceName = "test-resource"
-	typeNamespacedName := types.NamespacedName{
-		Name:      resourceName,
-		Namespace: "default",
-	}
-	workspace := &tfreconcilev1alpha1.Workspace{}
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: testEnv.Scheme,
+	})
+	assert.NoError(t, err)
+
+	localModule := `resource "random_pet" "name" {
+  length    = 2
+  separator = "-"
+}
+`
+
+	rootDir := t.TempDir()
+	err = (&WorkspaceReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("krec"),
+
+		Tf: runner.New(rootDir),
+		Renderer: render.NewLocalModuleRenderer(rootDir, map[string][]byte{
+			"my-module": []byte(localModule),
+		}),
+	}).SetupWithManager(mgr)
+	go mgr.Start(ctx)
+
+	<-mgr.Elected()
+
+	t.Cleanup(func() {
+		cancel()
+		err = testEnv.Stop()
+		assert.NoError(t, err)
+	})
 
 	t.Run("creating the custom resource for the Kind Workspace", func(t *testing.T) {
-		err := k8sClient.Get(ctx, typeNamespacedName, workspace)
-		if err != nil && errors.IsNotFound(err) {
-			resource := &tfreconcilev1alpha1.Workspace{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      resourceName,
-					Namespace: "default",
+		resource := &tfreconcilev1alpha1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-resource",
+				Namespace: "default",
+			},
+			Spec: tfreconcilev1alpha1.WorkspaceSpec{
+				Backend: tfreconcilev1alpha1.BackendSpec{
+					Type: "local",
 				},
-				Spec: tfreconcilev1alpha1.WorkspaceSpec{
-					Backend: tfreconcilev1alpha1.BackendSpec{
-						Type: "s3",
-						Inputs: &apiextensionsv1.JSON{
-							Raw: []byte(`{"bucket": "my-bucket"}`),
-						},
-					},
-					ProviderSpecs: []tfreconcilev1alpha1.ProviderSpec{
-						{
-							Name:    "aws",
-							Version: "1.0",
-							Source:  "hashicorp/aws",
-						},
-					},
-					Module: &tfreconcilev1alpha1.ModuleSpec{
-						Source:  "terraform-aws-modules/vpc/aws",
-						Version: "5.19.0",
+				AutoApply:        true,
+				TerraformVersion: "1.13.3",
+				ProviderSpecs: []tfreconcilev1alpha1.ProviderSpec{
+					{
+						Name:    "aws",
+						Version: ">= 5.63.1",
+						Source:  "hashicorp/aws",
 					},
 				},
-			}
-			assert.NoError(t, k8sClient.Create(ctx, resource))
+				Module: &tfreconcilev1alpha1.ModuleSpec{
+					Source: "my-module",
+					Name:   "my-module",
+				},
+			},
 		}
+		assert.NoError(t, k8sClient.Create(ctx, resource))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
+			d := object.(*tfreconcilev1alpha1.Workspace)
+			return d.Status.ValidRender
+		}), wait.WithTimeout(time.Minute*2))
+		assert.NoError(t, err)
+
+		events := &v1.EventList{}
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 1,
+			resources.WithFieldSelector(fmt.Sprintf("involvedObject.name=%s", resource.Name))), wait.WithContext(ctx))
+		assert.NoError(t, err)
+		var reasons []string
+		for _, e := range events.Items {
+			reasons = append(reasons, e.Reason)
+		}
+		assert.Len(t, reasons, 2)
+		assert.Contains(t, reasons, TFApplyEventReason)
+		assert.Contains(t, reasons, TFPlanEventReason)
 	})
 }

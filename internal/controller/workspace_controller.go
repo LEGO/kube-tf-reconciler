@@ -4,13 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
 	"github.com/LEGO/kube-tf-reconciler/pkg/render"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
-	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/hashicorp/terraform-exec/tfexec"
 	authv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
@@ -43,7 +41,8 @@ type WorkspaceReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 
-	Tf *runner.Exec
+	Tf       *runner.Exec
+	Renderer render.Renderer
 }
 
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -106,7 +105,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	result, err := r.renderHcl(tf.WorkingDir(), ws)
+	result, err := r.Renderer.Render(ws)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to render workspace %s: %w", req.String(), err)
 	}
@@ -115,7 +114,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
 			return err
 		}
-		ws.Status.CurrentRender = string(result)
+		ws.Status.CurrentRender = result
 		return r.Client.Status().Update(ctx, &ws)
 	})
 	if err != nil {
@@ -232,32 +231,6 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.Client.Status().Update(ctx, &ws)
 	})
 	return ctrl.Result{}, err
-}
-
-func (r *WorkspaceReconciler) renderHcl(workspaceDir string, ws tfreconcilev1alpha1.Workspace) ([]byte, error) {
-	f := hclwrite.NewEmptyFile()
-	err := render.Workspace(f.Body(), ws)
-	renderErr := fmt.Errorf("failed to render workspace %s/%s", ws.Namespace, ws.Name)
-	if err != nil {
-		return f.Bytes(), fmt.Errorf("%w: %w", renderErr, err)
-	}
-
-	err = render.Providers(f.Body(), ws.Spec.ProviderSpecs)
-	if err != nil {
-		return f.Bytes(), fmt.Errorf("%w: failed to render providers: %w", renderErr, err)
-	}
-
-	err = render.Module(f.Body(), ws.Spec.Module)
-	if err != nil {
-		return f.Bytes(), fmt.Errorf("%w: failed to render module: %w", renderErr, err)
-	}
-
-	err = os.WriteFile(filepath.Join(workspaceDir, "main.tf"), f.Bytes(), 0644)
-	if err != nil {
-		return f.Bytes(), fmt.Errorf("%w: failed to write workspace: %w", renderErr, err)
-	}
-
-	return f.Bytes(), nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
