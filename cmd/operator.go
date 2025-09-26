@@ -70,6 +70,17 @@ var operatorCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		planReconciler := &controller.SimplePlanReconciler{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorderFor("krec-plan"),
+		}
+
+		if err = planReconciler.SetupWithManager(mgr); err != nil {
+			slog.Error("unable to create plan controller", "error", err)
+			os.Exit(1)
+		}
+
 		if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 			slog.Error("unable to set up health check", "error", err)
 			os.Exit(1)
