@@ -2,9 +2,13 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -64,7 +68,7 @@ func New(rootDir string) *Exec {
 }
 
 func (e *Exec) SetupWorkspace(ws string) (string, error) {
-	fullPath := filepath.Join(e.WorkspacesDir, ws)
+	fullPath := filepath.Join(e.WorkspacesDir, ws, ".terraform")
 	err := os.MkdirAll(fullPath, 0755)
 	if err != nil {
 		return "", fmt.Errorf("failed to create workspace dir: %w", err)
@@ -125,7 +129,7 @@ func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) 
 	return execPath, nil
 }
 
-func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (*tfexec.Terraform, string, error) {
+func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (*tfexec.Terraform, string, error) {
 	path, err := e.SetupWorkspace(filepath.Join(ws.Namespace, ws.Name))
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to setup workspace: %w", err)
@@ -152,7 +156,7 @@ func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws tfreconcilev1alp
 	return tf, terraformRCPath, nil
 }
 
-func (e *Exec) CleanupWorkspace(ws tfreconcilev1alpha1.Workspace) error {
+func (e *Exec) CleanupWorkspace(ws *tfreconcilev1alpha1.Workspace) error {
 	workspacePath := filepath.Join(e.WorkspacesDir, ws.Namespace, ws.Name)
 
 	if _, err := os.Stat(workspacePath); os.IsNotExist(err) {
@@ -165,4 +169,42 @@ func (e *Exec) CleanupWorkspace(ws tfreconcilev1alpha1.Workspace) error {
 	}
 
 	return nil
+}
+
+// CalculateChecksum computes a SHA256 checksum of .terraform
+// Expecting the workspace folders to be initialized already
+func (e *Exec) CalculateChecksum(ws *tfreconcilev1alpha1.Workspace) (string, error) {
+	var files []string
+	folder := filepath.Join(e.WorkspacesDir, ws.Namespace, ws.Name, ".terraform")
+	err := filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+
+	sort.Strings(files)
+
+	hasher := sha256.New()
+	for _, file := range files {
+		f, err := os.Open(file)
+		if err != nil {
+			return "", err
+		}
+
+		if _, err := io.Copy(hasher, f); err != nil {
+			_ = f.Close()
+			return "", err
+		}
+
+		_ = f.Close()
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }

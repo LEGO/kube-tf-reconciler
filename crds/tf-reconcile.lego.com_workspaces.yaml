@@ -226,6 +226,11 @@ spec:
           status:
             description: WorkspaceStatus defines the observed state of Workspace.
             properties:
+              currentContentHash:
+                description: |-
+                  CurrentContentHash is a hash of the .terraform directory content, used to detect
+                  changes in modules that are not evident in the workspace spec (e.g. git modules)
+                type: string
               currentPlan:
                 description: CurrentPlan is a reference to the current Plan resource
                 properties:
@@ -257,6 +262,12 @@ spec:
               lastPlanOutput:
                 description: LastPlanOutput contains the raw terraform plan output
                 type: string
+              newApplyNeeded:
+                description: NewApplyNeeded indicates whether a new apply is needed
+                type: boolean
+              newPlanNeeded:
+                description: NewPlanNeeded indicates whether a new plan is needed
+                type: boolean
               nextRefreshTimestamp:
                 description: NextRefreshTimestamp is the next time the workspace will
                   be refreshed
@@ -280,9 +291,9 @@ spec:
                 description: ValidRender is the result of the validation of the workspace
                 type: boolean
             required:
-            - currentRender
-            - observedGeneration
-            - validRender
+            - currentContentHash
+            - newApplyNeeded
+            - newPlanNeeded
             type: object
         type: object
     served: true
