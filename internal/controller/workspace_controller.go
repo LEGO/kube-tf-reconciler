@@ -12,7 +12,6 @@ import (
 	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
 	"github.com/LEGO/kube-tf-reconciler/pkg/render"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
-	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/hashicorp/terraform-exec/tfexec"
 	tfjson "github.com/hashicorp/terraform-json"
 	authv1 "k8s.io/api/authentication/v1"
@@ -53,7 +52,8 @@ type WorkspaceReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 
-	Tf *runner.Exec
+	Tf       *runner.Exec
+	Renderer render.Renderer
 }
 
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -106,7 +106,7 @@ func planAndApplyWorkspace(ctx context.Context, r *WorkspaceReconciler, req ctrl
 		return ctrl.Result{}, fmt.Errorf("failed to cleanup old plans: %w", err)
 	}
 
-	result, err := r.renderHclForWorkspace(ws)
+	result, err := r.Renderer.Render(ws)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to render workspace %s: %w", req.String(), err)
 	}
@@ -115,7 +115,7 @@ func planAndApplyWorkspace(ctx context.Context, r *WorkspaceReconciler, req ctrl
 		if err := r.Client.Get(ctx, req.NamespacedName, &ws); err != nil {
 			return err
 		}
-		ws.Status.CurrentRender = string(result)
+		ws.Status.CurrentRender = result
 		return r.Client.Status().Update(ctx, &ws)
 	})
 	if err != nil {
@@ -123,27 +123,6 @@ func planAndApplyWorkspace(ctx context.Context, r *WorkspaceReconciler, req ctrl
 	}
 
 	return r.executeTerraform(ctx, &ws, string(result), destroy)
-}
-
-func (r *WorkspaceReconciler) renderHclForWorkspace(ws tfreconcilev1alpha1.Workspace) ([]byte, error) {
-	f := hclwrite.NewEmptyFile()
-	err := render.Workspace(f.Body(), ws)
-	renderErr := fmt.Errorf("failed to render workspace %s/%s", ws.Namespace, ws.Name)
-	if err != nil {
-		return f.Bytes(), fmt.Errorf("%w: %w", renderErr, err)
-	}
-
-	err = render.Providers(f.Body(), ws.Spec.ProviderSpecs)
-	if err != nil {
-		return f.Bytes(), fmt.Errorf("%w: failed to render providers: %w", renderErr, err)
-	}
-
-	err = render.Module(f.Body(), ws.Spec.Module)
-	if err != nil {
-		return f.Bytes(), fmt.Errorf("%w: failed to render module: %w", renderErr, err)
-	}
-
-	return f.Bytes(), nil
 }
 
 func handleWorkspaceDeletion(ctx context.Context, r *WorkspaceReconciler, req ctrl.Request, ws tfreconcilev1alpha1.Workspace) (ctrl.Result, error) {
@@ -218,12 +197,12 @@ func (r *WorkspaceReconciler) alreadyProcessedOnce(ws tfreconcilev1alpha1.Worksp
 	}
 
 	// Check if the current render would be the same
-	newRender, err := r.renderHclForWorkspace(ws)
+	newRender, err := r.Renderer.Render(ws)
 	if err != nil {
 		return false
 	}
 
-	return ws.Status.CurrentRender == string(newRender)
+	return ws.Status.CurrentRender == newRender
 }
 func (r *WorkspaceReconciler) dueForRefresh(t time.Time, ws tfreconcilev1alpha1.Workspace) bool {
 	return t.After(ws.Status.NextRefreshTimestamp.Time)
