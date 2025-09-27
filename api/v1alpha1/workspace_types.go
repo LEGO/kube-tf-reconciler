@@ -172,6 +172,7 @@ type WorkspaceStatus struct {
 
 	// CurrentContentHash is a hash of the .terraform directory content, used to detect
 	// changes in modules that are not evident in the workspace spec (e.g. git modules)
+	// +kubebuilder:validation:Optional
 	CurrentContentHash string `json:"currentContentHash"`
 	// NextRefreshTimestamp is the next time the workspace will be refreshed
 	// +kubebuilder:validation:Optional
@@ -181,9 +182,11 @@ type WorkspaceStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration"`
 
 	// NewPlanNeeded indicates whether a new plan is needed
+	// +kubebuilder:validation:Optional
 	NewPlanNeeded bool `json:"newPlanNeeded"`
 
 	// NewApplyNeeded indicates whether a new apply is needed
+	// +kubebuilder:validation:Optional
 	NewApplyNeeded bool `json:"newApplyNeeded"`
 	// Terraform execution status
 	// TerraformPhase represents the current terraform execution phase

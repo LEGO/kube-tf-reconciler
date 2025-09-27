@@ -68,7 +68,7 @@ func New(rootDir string) *Exec {
 }
 
 func (e *Exec) SetupWorkspace(ws string) (string, error) {
-	fullPath := filepath.Join(e.WorkspacesDir, ws, ".terraform")
+	fullPath := filepath.Join(e.WorkspacesDir, ws)
 	err := os.MkdirAll(fullPath, 0755)
 	if err != nil {
 		return "", fmt.Errorf("failed to create workspace dir: %w", err)
@@ -180,7 +180,7 @@ func (e *Exec) CalculateChecksum(ws *tfreconcilev1alpha1.Workspace) (string, err
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() {
+		if info.Mode().IsRegular() {
 			files = append(files, path)
 		}
 		return nil

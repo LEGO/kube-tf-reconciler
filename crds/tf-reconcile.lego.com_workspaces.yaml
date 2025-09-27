@@ -290,10 +290,6 @@ spec:
               validRender:
                 description: ValidRender is the result of the validation of the workspace
                 type: boolean
-            required:
-            - currentContentHash
-            - newApplyNeeded
-            - newPlanNeeded
             type: object
         type: object
     served: true
