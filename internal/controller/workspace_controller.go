@@ -70,6 +70,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{}, nil
 	}
+	logf.IntoContext(ctx, log.WithValues("workspace", req.String()))
 
 	res, err, ret, tf := r.setupTerraformForWorkspace(ctx, ws)
 	if ret {
@@ -100,7 +101,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, fmt.Errorf("handleCleanup: %w", err)
 	}
 
-	log.Info("reconcile completed", "workspace", req.String())
+	log.V(1).Info("reconcile completed", "workspace", req.String())
 	return ctrl.Result{}, nil
 }
 
@@ -123,7 +124,8 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfreconci
 
 func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
-	log.Info("refreshing dependencies", "workspace", ws.Name)
+	defer log.V(2).Info("refresh dependencies completed")
+	log.V(2).Info("refreshing dependencies starting")
 
 	err := r.Tf.TerraformInit(ctx, tf)
 	if err != nil {
@@ -187,11 +189,12 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 
 func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
+	defer log.V(2).Info("handle plan completed")
+	log.V(2).Info("handle plan starting")
+
 	if !ws.Status.NewPlanNeeded {
 		return ctrl.Result{}, nil, false
 	}
-
-	log.Info("plan started", "workspace", ws.Name)
 
 	_ = r.updateWorkspaceStatus(ctx, ws, TFPhasePlanning, "Starting terraform plan", nil)
 
@@ -233,7 +236,6 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1a
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status with current plan: %w", err), true
 	}
 
-	log.Info("plan completed", "workspace", ws.Name, "changes", changed)
 	r.Recorder.Eventf(ws, v1.EventTypeNormal, TFPlanEventReason, "Terraform plan completed, changes: %t", changed)
 
 	return ctrl.Result{}, nil, false
@@ -241,11 +243,12 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1a
 
 func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
+	defer log.V(2).Info("handle apply completed")
+	log.V(2).Info("handle apply starting")
+
 	if !ws.Status.NewApplyNeeded {
 		return ctrl.Result{}, nil, false
 	}
-
-	log.Info("apply started", "workspace", ws.Name)
 
 	if !ws.Spec.AutoApply {
 		now := metav1.Now()
@@ -306,7 +309,8 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfreconcilev1
 
 func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error, bool, *tfexec.Terraform) {
 	log := logf.FromContext(ctx)
-	log.V(0).Info("setting up terraform for workspace", "workspace", ws.Name)
+	defer log.V(2).Info("setup terraform completed")
+	log.V(2).Info("setup terraform starting")
 
 	envs, err := r.getEnvsForExecution(ctx, ws)
 	if err != nil {
@@ -340,12 +344,12 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 
 func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
+	defer log.V(2).Info("handling deletion and finalizers completed")
+	log.V(2).Info("handling deletion and finalizers starting")
 
 	if ws.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil, false
 	}
-
-	log.V(0).Info("delete starting", "workspace", ws.Name)
 
 	if !ws.Spec.PreventDestroy {
 		err := tf.Destroy(ctx)
@@ -366,12 +370,13 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 		}
 	}
 
-	log.Info("delete completed", "workspace", ws.Name)
-
 	return ctrl.Result{}, nil, false
 }
 
 func (r *WorkspaceReconciler) handleCleanup(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+	defer log.V(2).Info("cleanup completed")
+	log.V(2).Info("cleanup starting")
 	old := ws.DeepCopy()
 	ws.Status.ObservedGeneration = ws.Generation
 	err := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))

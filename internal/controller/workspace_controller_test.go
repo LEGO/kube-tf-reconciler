@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 	"testing"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/LEGO/kube-tf-reconciler/internal/testutils"
 	"github.com/LEGO/kube-tf-reconciler/pkg/render"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/klient/k8s"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
@@ -29,6 +33,8 @@ import (
 func TestWorkspaceController(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logf.SetLogger(logr.FromSlogHandler(handler))
 
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{testutils.CRDFolder()},
