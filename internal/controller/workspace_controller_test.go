@@ -17,13 +17,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/klient/k8s"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
@@ -58,7 +57,12 @@ func TestWorkspaceController(t *testing.T) {
 	k, err := klient.New(cfg)
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: testEnv.Scheme,
+		Scheme:                 testEnv.Scheme,
+		LeaderElection:         false,
+		HealthProbeBindAddress: "0",
+		Metrics: metricsserver.Options{
+			BindAddress: "0",
+		},
 	})
 	assert.NoError(t, err)
 
@@ -146,7 +150,8 @@ func TestWorkspaceController(t *testing.T) {
 		assert.NotEmpty(t, resource.Status.LastPlanOutput)
 
 		plans := &tfreconcilev1alpha1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListMatchN(plans, 1, WithOwner(resource, testEnv.Scheme)),
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0,
+			resources.WithLabelSelector(fmt.Sprintf("%s=%s", workspacePlanLabel, resource.Name))),
 			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
@@ -185,28 +190,28 @@ func TestWorkspaceController(t *testing.T) {
 				},
 			},
 		}
-		assert.NoError(t, k8sClient.Create(ctx, resource))
+		assert.NoError(t, k.Resources().Create(ctx, resource))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
+			d := object.(*tfreconcilev1alpha1.Workspace)
+			return d.Status.ObservedGeneration == d.Generation
+		}))
+		assert.NoError(t, err)
 
 		plans := &tfreconcilev1alpha1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListMatchN(plans, 1, WithOwner(resource, testEnv.Scheme)),
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0,
+			resources.WithLabelSelector(fmt.Sprintf("%s=%s", workspacePlanLabel, resource.Name))),
+			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+
+		assert.Len(t, plans.Items, 1)
+		assert.NoError(t, k.Resources().Delete(ctx, resource))
+		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(resource),
 			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
-		assert.Len(t, plans.Items, 1)
-		assert.NoError(t, k8sClient.Delete(ctx, resource))
-
-		err = wait.For(conditions.New(k.Resources()).ResourcesDeleted(plans), wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+		emptyPlans := &tfreconcilev1alpha1.PlanList{}
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(emptyPlans, 0,
+			resources.WithLabelSelector(fmt.Sprintf("%s=%s", workspacePlanLabel, resource.Name))),
+			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
 		assert.NoError(t, err)
 	})
-}
-
-func WithOwner(owner client.Object, schema *runtime.Scheme) func(k8s.Object) bool {
-	return func(object k8s.Object) bool {
-		found, err := controllerutil.HasOwnerReference(object.GetOwnerReferences(), owner, schema)
-		if err != nil {
-			return false
-		}
-
-		return found
-	}
 }

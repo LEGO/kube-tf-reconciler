@@ -102,8 +102,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, fmt.Errorf("handleApply: %w", err)
 	}
 
-	if res, err, ret = r.handleCleanup(ctx, ws); ret {
-		return res, fmt.Errorf("handleCleanup: %w", err)
+	if res, err, ret = r.handleReschedule(ctx, ws); ret {
+		return res, fmt.Errorf("handleReschedule: %w", err)
 	}
 
 	log.V(DebugLevel).Info("reconcile completed")
@@ -130,8 +130,9 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfreconci
 
 func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
+
+	log.V(DebugLevel).Info("refresh dependencies starting")
 	defer log.V(DebugLevel).Info("refresh dependencies completed")
-	log.V(DebugLevel).Info("refreshing dependencies starting")
 
 	err := r.Tf.TerraformInit(ctx, tf)
 	if err != nil {
@@ -169,12 +170,17 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	}
 
 	workspaceUnchanged := ws.Status.ObservedGeneration == ws.Generation
-	checksumChanged := ws.Status.CurrentContentHash != sum && ws.Status.CurrentContentHash != ""
-	//timeForRefresh := t.After(ws.Status.NextRefreshTimestamp.Time)
-	missingPlan := ws.Status.CurrentPlan == nil
+	checksumUnchanged := ws.Status.CurrentContentHash == sum && ws.Status.CurrentContentHash != ""
+	hasPlan := ws.Status.CurrentPlan != nil
+	isDeleting := !ws.DeletionTimestamp.IsZero()
 
-	if workspaceUnchanged && !checksumChanged && /*!timeForRefresh &&*/ !missingPlan {
-		log.Info("skipping refresh - no changes detected", "workspace", ws.Name)
+	if isDeleting {
+		log.V(DebugLevel).Info("workspace is being deleted, skipping unchanged checks")
+		return ctrl.Result{}, nil, false
+	}
+
+	if workspaceUnchanged && checksumUnchanged && hasPlan {
+		log.V(DebugLevel).Info("skipping refresh - no changes detected", "workspace", ws.Name)
 		return ctrl.Result{}, nil, false
 	}
 
@@ -194,12 +200,13 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 
 func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
-	defer log.V(DebugLevel).Info("handle plan completed")
-	log.V(DebugLevel).Info("handle plan starting")
 
 	if !ws.Status.NewPlanNeeded {
 		return ctrl.Result{}, nil, false
 	}
+
+	log.V(DebugLevel).Info("handle plan starting")
+	defer log.V(DebugLevel).Info("handle plan completed")
 
 	_ = r.updateWorkspaceStatus(ctx, ws, TFPhasePlanning, "Starting terraform plan", nil)
 
@@ -223,7 +230,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1a
 		}
 	}
 
-	plan, err := r.createPlanRecord(ctx, *ws, changed, planOutput, "", false, false)
+	plan, err := r.createPlanRecord(ctx, ws, changed, planOutput, "", false, false)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to create plan record: %w", err), true
 
@@ -249,12 +256,13 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1a
 
 func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
-	defer log.V(DebugLevel).Info("handle apply completed")
-	log.V(DebugLevel).Info("handle apply starting")
 
 	if !ws.Status.NewApplyNeeded {
 		return ctrl.Result{}, nil, false
 	}
+
+	log.V(DebugLevel).Info("handle apply starting")
+	defer log.V(DebugLevel).Info("handle apply completed")
 
 	if !ws.Spec.AutoApply {
 		now := metav1.Now()
@@ -280,7 +288,7 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfreconcilev1
 			return ctrl.Result{}, err, true
 		}
 
-		_, err = r.createPlanRecord(ctx, *ws, ws.Status.HasChanges, ws.Status.LastPlanOutput, applyOutput, true, false)
+		_, err = r.createPlanRecord(ctx, ws, ws.Status.HasChanges, ws.Status.LastPlanOutput, applyOutput, true, false)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to create plan record after failed apply: %w", err), true
 		}
@@ -291,7 +299,6 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfreconcilev1
 			s.LastApplyOutput = applyOutput
 		})
 
-		log.Info("apply completed", "workspace", ws.Name)
 		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "Terraform apply completed successfully")
 	}
 
@@ -342,12 +349,20 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 
 func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
-	defer log.V(DebugLevel).Info("handling deletion and finalizers completed")
-	log.V(DebugLevel).Info("handling deletion and finalizers starting")
+
+	if ws.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(ws, workspaceFinalizer) {
+		controllerutil.AddFinalizer(ws, workspaceFinalizer)
+		if err := r.Update(ctx, ws); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err), true
+		}
+	}
 
 	if ws.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil, false
 	}
+
+	log.V(DebugLevel).Info("handling deletion and finalizers starting")
+	defer log.V(DebugLevel).Info("handling deletion and finalizers completed")
 
 	if !ws.Spec.PreventDestroy {
 		err := tf.Destroy(ctx)
@@ -371,10 +386,16 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) handleCleanup(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error, bool) {
+func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
-	defer log.V(DebugLevel).Info("cleanup completed")
-	log.V(DebugLevel).Info("cleanup starting")
+
+	if !ws.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil, false
+	}
+
+	log.V(DebugLevel).Info("reshedule starting")
+	defer log.V(DebugLevel).Info("reshedule completed")
+
 	old := ws.DeepCopy()
 	ws.Status.ObservedGeneration = ws.Generation
 	ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(5 * time.Minute))
@@ -455,13 +476,6 @@ func constructOutput(stdout, stderr bytes.Buffer, err error) (string, error) {
 	return output, err
 }
 
-type workspaceStatusUpdate struct {
-	hasChanges     bool
-	planOutput     string
-	applyOutput    string
-	completionTime *metav1.Time
-}
-
 // updateWorkspaceStatus updates the terraform execution status in the workspace
 func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, phase string, message string, updater func(status *tfreconcilev1alpha1.WorkspaceStatus)) error {
 	old := ws.DeepCopy()
@@ -483,7 +497,7 @@ func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfr
 }
 
 // createPlanRecord creates a Plan CRD as an audit record after terraform execution
-func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws tfreconcilev1alpha1.Workspace, hasChanges bool, planOutput, applyOutput string, wasApplied bool, destroy bool) (*tfreconcilev1alpha1.Plan, error) {
+func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, hasChanges bool, planOutput, applyOutput string, wasApplied bool, destroy bool) (*tfreconcilev1alpha1.Plan, error) {
 	planName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
 
 	phase := tfreconcilev1alpha1.PlanPhasePlanned
@@ -517,7 +531,7 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws tfreconci
 		},
 	}
 
-	err := controllerutil.SetControllerReference(&ws, plan, r.Scheme)
+	err := controllerutil.SetControllerReference(ws, plan, r.Scheme)
 	if err != nil {
 		return nil, fmt.Errorf("failed to set controller reference on plan: %w", err)
 	}
