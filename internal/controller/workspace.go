@@ -64,7 +64,6 @@ type WorkspaceReconciler struct {
 
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	//reqStart := time.Now()
 	ws := &tfreconcilev1alpha1.Workspace{}
 	if err := r.Client.Get(ctx, req.NamespacedName, ws); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -187,7 +186,6 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	old = ws.DeepCopy()
 	ws.Status.CurrentContentHash = sum
 	ws.Status.NewPlanNeeded = true
-	ws.Status.NewApplyNeeded = true
 
 	err = r.Status().Patch(ctx, ws, client.MergeFrom(old))
 	if err != nil {
@@ -239,6 +237,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1a
 	err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan completed", func(s *tfreconcilev1alpha1.WorkspaceStatus) {
 		s.HasChanges = changed
 		s.NewPlanNeeded = false
+		s.NewApplyNeeded = true
 		s.LastPlanOutput = planOutput
 		s.CurrentPlan = &tfreconcilev1alpha1.PlanReference{
 			Name:      plan.Name,
