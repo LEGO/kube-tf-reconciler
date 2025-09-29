@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -30,11 +31,14 @@ import (
 	"sigs.k8s.io/e2e-framework/klient/wait/conditions"
 )
 
+func init() {
+	slog.SetLogLoggerLevel(slog.LevelDebug)
+	logf.SetLogger(logr.FromSlogHandler(slog.Default().Handler()).V(5))
+}
+
 func TestWorkspaceController(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
-	logf.SetLogger(logr.FromSlogHandler(handler))
 
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{testutils.CRDFolder()},
@@ -64,7 +68,7 @@ func TestWorkspaceController(t *testing.T) {
 }
 `
 
-	rootDir := t.TempDir()
+	rootDir := testutils.TestDataFolder()
 	t.Logf("using root dir: %s", rootDir)
 	err = (&WorkspaceReconciler{
 		Client:   mgr.GetClient(),
@@ -82,6 +86,8 @@ func TestWorkspaceController(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		err = testEnv.Stop()
+		assert.NoError(t, err)
+		err = os.RemoveAll(filepath.Join(rootDir, "workspaces"))
 		assert.NoError(t, err)
 	})
 
@@ -102,6 +108,11 @@ func TestWorkspaceController(t *testing.T) {
 						Name:    "aws",
 						Version: ">= 5.63.1",
 						Source:  "hashicorp/aws",
+					},
+					{
+						Name:    "random",
+						Version: "3.7.2",
+						Source:  "hashicorp/random",
 					},
 				},
 				Module: &tfreconcilev1alpha1.ModuleSpec{
@@ -127,13 +138,20 @@ func TestWorkspaceController(t *testing.T) {
 			reasons = append(reasons, e.Reason)
 		}
 
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
+			d := object.(*tfreconcilev1alpha1.Workspace)
+			return d.Status.ObservedGeneration == d.Generation
+		}))
+		assert.NoError(t, err)
+		assert.NotEmpty(t, resource.Status.LastPlanOutput)
+
 		plans := &tfreconcilev1alpha1.PlanList{}
 		err = wait.For(conditions.New(k.Resources()).ResourceListMatchN(plans, 1, WithOwner(resource, testEnv.Scheme)),
 			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
 		relevantPlan := plans.Items[0]
-		assert.Equal(t, tfreconcilev1alpha1.PlanPhasePlanned, relevantPlan.Status.Phase)
+		assert.Equal(t, tfreconcilev1alpha1.PlanPhaseApplied, relevantPlan.Status.Phase)
 		assert.NotEmpty(t, relevantPlan.Status.ApplyOutput)
 
 		assert.Len(t, reasons, 3)

@@ -11,7 +11,7 @@ import (
 func TestChecksum(t *testing.T) {
 	e := New("/Users/dkFleThe/src/kube-tf-reconciler/.testdata")
 
-	check, err := e.CalculateChecksum(tfreconcilev1alpha1.Workspace{
+	check, err := e.CalculateChecksum(&tfreconcilev1alpha1.Workspace{
 		ObjectMeta: v1.ObjectMeta{
 			Name:      "workspace1",
 			Namespace: "test-ns1",

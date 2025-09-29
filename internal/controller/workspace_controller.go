@@ -29,6 +29,8 @@ import (
 )
 
 const (
+	DebugLevel = 0
+
 	TFErrEventReason      = "TerraformError"
 	TFPlanEventReason     = "TerraformPlan"
 	TFApplyEventReason    = "TerraformApply"
@@ -71,6 +73,9 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 	logf.IntoContext(ctx, log.WithValues("workspace", req.String()))
+	if ws.Status.ObservedGeneration == ws.Generation && time.Now().Before(ws.Status.NextRefreshTimestamp.Time) {
+		return ctrl.Result{RequeueAfter: time.Until(ws.Status.NextRefreshTimestamp.Time)}, nil
+	}
 
 	res, err, ret, tf := r.setupTerraformForWorkspace(ctx, ws)
 	if ret {
@@ -101,8 +106,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, fmt.Errorf("handleCleanup: %w", err)
 	}
 
-	log.V(1).Info("reconcile completed", "workspace", req.String())
-	return ctrl.Result{}, nil
+	log.V(DebugLevel).Info("reconcile completed")
+	return ctrl.Result{RequeueAfter: time.Until(ws.Status.NextRefreshTimestamp.Time)}, nil
 }
 
 func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error, bool) {
@@ -112,8 +117,9 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfreconci
 		return ctrl.Result{}, err, true
 	}
 
+	old := ws.DeepCopy()
 	ws.Status.CurrentRender = rendering
-	err = r.Status().Patch(ctx, ws, client.MergeFrom(ws.DeepCopy()))
+	err = r.Status().Patch(ctx, ws, client.MergeFrom(old))
 	if err != nil {
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace status after rendering: %v", err), nil)
 		return ctrl.Result{}, err, true
@@ -124,8 +130,8 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfreconci
 
 func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
-	defer log.V(2).Info("refresh dependencies completed")
-	log.V(2).Info("refreshing dependencies starting")
+	defer log.V(DebugLevel).Info("refresh dependencies completed")
+	log.V(DebugLevel).Info("refreshing dependencies starting")
 
 	err := r.Tf.TerraformInit(ctx, tf)
 	if err != nil {
@@ -183,14 +189,13 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 		return ctrl.Result{}, err, true
 	}
 
-	r.Recorder.Eventf(ws, v1.EventTypeNormal, TFPlanEventReason, "Marked workspace as requiring a new plan")
 	return ctrl.Result{}, nil, false
 }
 
 func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
-	defer log.V(2).Info("handle plan completed")
-	log.V(2).Info("handle plan starting")
+	defer log.V(DebugLevel).Info("handle plan completed")
+	log.V(DebugLevel).Info("handle plan starting")
 
 	if !ws.Status.NewPlanNeeded {
 		return ctrl.Result{}, nil, false
@@ -207,11 +212,11 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1a
 
 	if !changed {
 		log.Info("plan has no changes, marking as completed", "workspace", ws.Name)
-		now := metav1.NewTime(time.Now())
-		err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan completed - no changes needed", &workspaceStatusUpdate{
-			hasChanges:     false,
-			planOutput:     planOutput,
-			completionTime: &now,
+		now := metav1.Now()
+		err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan completed - no changes needed", func(s *tfreconcilev1alpha1.WorkspaceStatus) {
+			s.HasChanges = false
+			s.LastPlanOutput = planOutput
+			s.LastExecutionTime = &now
 		})
 		if err != nil {
 			return ctrl.Result{}, err, true
@@ -224,14 +229,15 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1a
 
 	}
 
-	old := ws.DeepCopy()
-	ws.Status.CurrentPlan = &tfreconcilev1alpha1.PlanReference{
-		Name:      plan.Name,
-		Namespace: plan.Namespace,
-	}
-	ws.Status.NewPlanNeeded = false
-
-	err = r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan completed", func(s *tfreconcilev1alpha1.WorkspaceStatus) {
+		s.HasChanges = changed
+		s.NewPlanNeeded = false
+		s.LastPlanOutput = planOutput
+		s.CurrentPlan = &tfreconcilev1alpha1.PlanReference{
+			Name:      plan.Name,
+			Namespace: plan.Namespace,
+		}
+	})
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status with current plan: %w", err), true
 	}
@@ -243,8 +249,8 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfreconcilev1a
 
 func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
-	defer log.V(2).Info("handle apply completed")
-	log.V(2).Info("handle apply starting")
+	defer log.V(DebugLevel).Info("handle apply completed")
+	log.V(DebugLevel).Info("handle apply starting")
 
 	if !ws.Status.NewApplyNeeded {
 		return ctrl.Result{}, nil, false
@@ -252,16 +258,11 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfreconcilev1
 
 	if !ws.Spec.AutoApply {
 		now := metav1.Now()
-		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan completed successfully", &workspaceStatusUpdate{
-			hasChanges:     ws.Status.HasChanges,
-			planOutput:     ws.Status.LastPlanOutput,
-			completionTime: &now,
-		})
-
-		old := ws.DeepCopy()
 		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "Auto-apply is disabled, skipping apply")
-		ws.Status.NewApplyNeeded = false
-		err := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+		err := r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Apply skipped, no Auto-apply enabled", func(s *tfreconcilev1alpha1.WorkspaceStatus) {
+			s.LastExecutionTime = &now
+			s.NewApplyNeeded = false
+		})
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update workspace status after skipping apply: %w", err), true
 		}
@@ -274,23 +275,20 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfreconcilev1
 		applyOutput, err := r.executeTerraformApply(ctx, tf, false)
 		if err != nil {
 			log.Error(err, "failed to apply terraform", "workspace", ws.Name)
-			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to apply terraform: %v", err), &workspaceStatusUpdate{
-				hasChanges:  ws.Status.HasChanges,
-				planOutput:  ws.Status.LastPlanOutput,
-				applyOutput: applyOutput,
-			})
-
-			_, _ = r.createPlanRecord(ctx, *ws, ws.Status.HasChanges, ws.Status.LastPlanOutput, applyOutput, false, false)
+			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to apply terraform: %v", err), nil)
 
 			return ctrl.Result{}, err, true
 		}
 
+		_, err = r.createPlanRecord(ctx, *ws, ws.Status.HasChanges, ws.Status.LastPlanOutput, applyOutput, true, false)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to create plan record after failed apply: %w", err), true
+		}
+
 		now := metav1.Now()
-		err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Apply completed successfully", &workspaceStatusUpdate{
-			hasChanges:     ws.Status.HasChanges,
-			planOutput:     ws.Status.LastPlanOutput,
-			applyOutput:    applyOutput,
-			completionTime: &now,
+		err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Apply completed successfully", func(s *tfreconcilev1alpha1.WorkspaceStatus) {
+			s.LastExecutionTime = &now
+			s.LastApplyOutput = applyOutput
 		})
 
 		log.Info("apply completed", "workspace", ws.Name)
@@ -309,8 +307,8 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfreconcilev1
 
 func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error, bool, *tfexec.Terraform) {
 	log := logf.FromContext(ctx)
-	defer log.V(2).Info("setup terraform completed")
-	log.V(2).Info("setup terraform starting")
+	defer log.V(DebugLevel).Info("setup terraform completed")
+	log.V(DebugLevel).Info("setup terraform starting")
 
 	envs, err := r.getEnvsForExecution(ctx, ws)
 	if err != nil {
@@ -344,8 +342,8 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 
 func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
-	defer log.V(2).Info("handling deletion and finalizers completed")
-	log.V(2).Info("handling deletion and finalizers starting")
+	defer log.V(DebugLevel).Info("handling deletion and finalizers completed")
+	log.V(DebugLevel).Info("handling deletion and finalizers starting")
 
 	if ws.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil, false
@@ -375,10 +373,11 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 
 func (r *WorkspaceReconciler) handleCleanup(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
-	defer log.V(2).Info("cleanup completed")
-	log.V(2).Info("cleanup starting")
+	defer log.V(DebugLevel).Info("cleanup completed")
+	log.V(DebugLevel).Info("cleanup starting")
 	old := ws.DeepCopy()
 	ws.Status.ObservedGeneration = ws.Generation
+	ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(5 * time.Minute))
 	err := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status during cleanup: %w", err), true
@@ -464,7 +463,8 @@ type workspaceStatusUpdate struct {
 }
 
 // updateWorkspaceStatus updates the terraform execution status in the workspace
-func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, phase string, message string, update *workspaceStatusUpdate) error {
+func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, phase string, message string, updater func(status *tfreconcilev1alpha1.WorkspaceStatus)) error {
+	old := ws.DeepCopy()
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
 			return err
@@ -473,20 +473,11 @@ func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfr
 		ws.Status.TerraformPhase = phase
 		ws.Status.TerraformMessage = message
 
-		if update != nil {
-			if update.completionTime != nil {
-				ws.Status.LastExecutionTime = update.completionTime
-			}
-			ws.Status.HasChanges = update.hasChanges
-			if update.planOutput != "" {
-				ws.Status.LastPlanOutput = update.planOutput
-			}
-			if update.applyOutput != "" {
-				ws.Status.LastApplyOutput = update.applyOutput
-			}
+		if updater != nil {
+			updater(&ws.Status)
 		}
 
-		return r.Client.Status().Update(ctx, ws)
+		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	})
 	return err
 }
