@@ -164,15 +164,30 @@ type WorkspaceStatus struct {
 	// CurrentPlan is a reference to the current Plan resource
 	CurrentPlan *PlanReference `json:"currentPlan,omitempty"`
 	// CurrentRender is the current render of the workspace
+	// +kubebuilder:validation:Optional
 	CurrentRender string `json:"currentRender"`
 	// ValidRender is the result of the validation of the workspace
+	// +kubebuilder:validation:Optional
 	ValidRender bool `json:"validRender"`
+
+	// CurrentContentHash is a hash of the .terraform directory content, used to detect
+	// changes in modules that are not evident in the workspace spec (e.g. git modules)
+	// +kubebuilder:validation:Optional
+	CurrentContentHash string `json:"currentContentHash"`
 	// NextRefreshTimestamp is the next time the workspace will be refreshed
 	// +kubebuilder:validation:Optional
 	NextRefreshTimestamp metav1.Time `json:"nextRefreshTimestamp"`
 	// ObservedGeneration is the observed generation of the workspace
+	// +kubebuilder:validation:Optional
 	ObservedGeneration int64 `json:"observedGeneration"`
 
+	// NewPlanNeeded indicates whether a new plan is needed
+	// +kubebuilder:validation:Optional
+	NewPlanNeeded bool `json:"newPlanNeeded"`
+
+	// NewApplyNeeded indicates whether a new apply is needed
+	// +kubebuilder:validation:Optional
+	NewApplyNeeded bool `json:"newApplyNeeded"`
 	// Terraform execution status
 	// TerraformPhase represents the current terraform execution phase
 	// +kubebuilder:validation:Optional

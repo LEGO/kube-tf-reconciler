@@ -41,7 +41,7 @@ var operatorCmd = &cobra.Command{
 
 		slog.Info("config loaded", "config", cfg)
 
-		slog.SetLogLoggerLevel(slog.LevelInfo)
+		slog.SetLogLoggerLevel(slog.LevelDebug)
 		ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 
 		mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -67,17 +67,6 @@ var operatorCmd = &cobra.Command{
 
 		if err = reconciler.SetupWithManager(mgr); err != nil {
 			slog.Error("unable to create controller", "error", err)
-			os.Exit(1)
-		}
-
-		planReconciler := &controller.SimplePlanReconciler{
-			Client:   mgr.GetClient(),
-			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("krec-plan"),
-		}
-
-		if err = planReconciler.SetupWithManager(mgr); err != nil {
-			slog.Error("unable to create plan controller", "error", err)
 			os.Exit(1)
 		}
 
