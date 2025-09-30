@@ -262,6 +262,10 @@ spec:
               lastPlanOutput:
                 description: LastPlanOutput contains the raw terraform plan output
                 type: string
+              latestPlan:
+                description: LatestPlan is the name of the latest Plan resource created
+                  for this workspace
+                type: string
               newApplyNeeded:
                 description: NewApplyNeeded indicates whether a new apply is needed
                 type: boolean

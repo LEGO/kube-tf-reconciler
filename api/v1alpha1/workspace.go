@@ -207,6 +207,11 @@ type WorkspaceStatus struct {
 	// LastApplyOutput contains the raw terraform apply output
 	// +kubebuilder:validation:Optional
 	LastApplyOutput string `json:"lastApplyOutput,omitempty"`
+
+	// LatestPlan is the name of the latest Plan resource created for this workspace
+	// +kubebuilder:deprecatedversion:warning="This field is deprecated and will be removed in a future release. Use CurrentPlan instead."
+	// +kubebuilder:validation:Optional
+	LatestPlan string `json:"latestPlan,omitempty"`
 }
 
 // PlanReference contains a reference to a Plan resource
