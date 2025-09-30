@@ -147,7 +147,7 @@ type WorkspaceSpec struct {
 	AutoApply bool `json:"autoApply"`
 
 	// PreventDestroy is a flag to indicate if terraform destroy should be skipped when the resource is deleted
-	// +kubebuilder:default=false
+	// +kubebuilder:default=true
 	PreventDestroy bool `json:"preventDestroy"`
 
 	// TerraformRC contains the content of the .terraformrc file

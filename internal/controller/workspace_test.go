@@ -106,6 +106,7 @@ func TestWorkspaceController(t *testing.T) {
 					Type: "local",
 				},
 				AutoApply:        true,
+				PreventDestroy:   false,
 				TerraformVersion: "1.13.3",
 				ProviderSpecs: []tfreconcilev1alpha1.ProviderSpec{
 					{
@@ -134,7 +135,7 @@ func TestWorkspaceController(t *testing.T) {
 		assert.NoError(t, err)
 
 		events := &v1.EventList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 1,
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3,
 			resources.WithFieldSelector(fmt.Sprintf("involvedObject.name=%s", resource.Name))), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		var reasons []string
@@ -176,6 +177,7 @@ func TestWorkspaceController(t *testing.T) {
 					Type: "local",
 				},
 				AutoApply:        false,
+				PreventDestroy:   false,
 				TerraformVersion: "1.13.3",
 				ProviderSpecs: []tfreconcilev1alpha1.ProviderSpec{
 					{

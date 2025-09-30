@@ -41,7 +41,7 @@ var operatorCmd = &cobra.Command{
 
 		slog.Info("config loaded", "config", cfg)
 
-		slog.SetLogLoggerLevel(slog.LevelDebug)
+		slog.SetLogLoggerLevel(slog.LevelInfo)
 		ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 
 		mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{

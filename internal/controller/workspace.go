@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	DebugLevel = 0
+	DebugLevel = 2
 
 	TFErrEventReason      = "TerraformError"
 	TFPlanEventReason     = "TerraformPlan"

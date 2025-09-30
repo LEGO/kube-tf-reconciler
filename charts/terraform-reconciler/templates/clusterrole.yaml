@@ -4,13 +4,9 @@ metadata:
   name: {{ .Values.appName }}
 rules:
   - apiGroups: ["tf-reconcile.lego.com"]
-    resources: ["workspaces"]
+    resources: ["workspaces", "plans"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  
-  - apiGroups: ["tf-reconcile.lego.com"]
-    resources: ["workspaces/status"]
-    verbs: ["get", "update", "patch"]
-    
+      
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch"]

@@ -130,7 +130,7 @@ spec:
                 - source
                 type: object
               preventDestroy:
-                default: false
+                default: true
                 description: PreventDestroy is a flag to indicate if terraform destroy
                   should be skipped when the resource is deleted
                 type: boolean
