@@ -1,0 +1,140 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: plans.tf-reconcile.lego.com
+spec:
+  group: tf-reconcile.lego.com
+  names:
+    kind: Plan
+    listKind: PlanList
+    plural: plans
+    shortNames:
+    - tfplan
+    - plan
+    singular: plan
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.hasChanges
+      name: HasChanges
+      type: boolean
+    - jsonPath: .spec.autoApply
+      name: AutoApply
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Plan is the Schema for the plans API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: PlanSpec defines the desired state of Plan
+            properties:
+              autoApply:
+                default: false
+                description: AutoApply indicates whether this plan should be automatically
+                  applied
+                type: boolean
+              destroy:
+                default: false
+                description: Destroy indicates this is a destroy plan (empty HCL will
+                  be used)
+                type: boolean
+              render:
+                description: Render is the HCL content that will be planned
+                type: string
+              terraformVersion:
+                description: TerraformVersion is the version of terraform to use for
+                  this plan
+                type: string
+              workspaceRef:
+                description: WorkspaceRef is a reference to the Workspace that owns
+                  this Plan
+                properties:
+                  name:
+                    description: Name of the Workspace
+                    type: string
+                  namespace:
+                    description: Namespace of the Workspace, defaults to the same
+                      namespace as the Plan
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - autoApply
+            - destroy
+            - render
+            - terraformVersion
+            - workspaceRef
+            type: object
+          status:
+            description: PlanStatus defines the observed state of Plan
+            properties:
+              applyOutput:
+                description: ApplyOutput contains the raw terraform apply output
+                type: string
+              completionTime:
+                description: CompletionTime is the time the plan execution completed
+                format: date-time
+                type: string
+              hasChanges:
+                description: HasChanges indicates whether this plan contains changes
+                  to apply
+                type: boolean
+              message:
+                description: Message provides a human readable message indicating
+                  details about the transition
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the observed generation of the
+                  Plan
+                format: int64
+                type: integer
+              phase:
+                description: Phase represents the current phase of the Plan
+                type: string
+              planOutput:
+                description: PlanOutput contains the raw terraform plan output
+                type: string
+              startTime:
+                description: StartTime is the time the plan execution started
+                format: date-time
+                type: string
+              validRender:
+                description: ValidRender indicates whether the rendered HCL is valid
+                type: boolean
+            required:
+            - observedGeneration
+            - phase
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

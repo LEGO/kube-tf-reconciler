@@ -8,6 +8,7 @@ require (
 	github.com/hashicorp/hc-install v0.9.2
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/hashicorp/terraform-exec v0.24.0
+	github.com/hashicorp/terraform-json v0.27.2
 	github.com/spf13/cobra v1.10.1
 	github.com/spf13/viper v1.18.0
 	github.com/stretchr/testify v1.11.1
@@ -47,7 +48,6 @@ require (
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-retryablehttp v0.7.7 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/hashicorp/terraform-json v0.27.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect

@@ -44,6 +44,10 @@ func RootFolder() string {
 	return fp
 }
 
+func TestDataFolder() string {
+	return filepath.Join(RootFolder(), ".testdata")
+}
+
 func CRDFolder() string {
 	return filepath.Join(RootFolder(), "crds")
 }

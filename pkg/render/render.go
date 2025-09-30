@@ -12,7 +12,7 @@ import (
 )
 
 type Renderer interface {
-	Render(ws tfreconcilev1alpha1.Workspace) (string, error)
+	Render(ws *tfreconcilev1alpha1.Workspace) (string, error)
 }
 
 type FileRender struct {
@@ -31,14 +31,14 @@ func NewFileRender(rootDir string) *FileRender {
 	}
 }
 
-func (fr *FileRender) Render(ws tfreconcilev1alpha1.Workspace) (string, error) {
+func (fr *FileRender) Render(ws *tfreconcilev1alpha1.Workspace) (string, error) {
 	err := os.MkdirAll(filepath.Join(fr.RootDir, "workspaces", ws.Namespace, ws.Name), 0755)
 	if err != nil {
 		return "", fmt.Errorf("failed to create workspace dir: %w", err)
 	}
 
 	f := hclwrite.NewEmptyFile()
-	err = Workspace(f.Body(), ws)
+	err = Workspace(f.Body(), *ws)
 	renderErr := fmt.Errorf("failed to render workspace %s/%s", ws.Namespace, ws.Name)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", renderErr, err)
@@ -92,7 +92,7 @@ func NewLocalModuleRenderer(rootDir string, modules map[string][]byte) *LocalMod
 	}
 }
 
-func (lmr *LocalModuleRenderer) Render(ws tfreconcilev1alpha1.Workspace) (string, error) {
+func (lmr *LocalModuleRenderer) Render(ws *tfreconcilev1alpha1.Workspace) (string, error) {
 	if ws.Spec.Module != nil && len(lmr.modules) > 0 && slices.Contains(lmr.modules, ws.Spec.Module.Source) {
 		ws.Spec.Module.Source = filepath.Join(lmr.tmpPath, ws.Spec.Module.Source)
 	}

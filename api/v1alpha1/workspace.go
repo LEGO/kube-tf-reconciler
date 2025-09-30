@@ -147,7 +147,7 @@ type WorkspaceSpec struct {
 	AutoApply bool `json:"autoApply"`
 
 	// PreventDestroy is a flag to indicate if terraform destroy should be skipped when the resource is deleted
-	// +kubebuilder:default=false
+	// +kubebuilder:default=true
 	PreventDestroy bool `json:"preventDestroy"`
 
 	// TerraformRC contains the content of the .terraformrc file
@@ -161,17 +161,68 @@ type WorkspaceSpec struct {
 
 // WorkspaceStatus defines the observed state of Workspace.
 type WorkspaceStatus struct {
-	// LatestPlan is the latest plan of the workspace
-	LatestPlan string `json:"latestPlan"`
+	// CurrentPlan is a reference to the current Plan resource
+	CurrentPlan *PlanReference `json:"currentPlan,omitempty"`
 	// CurrentRender is the current render of the workspace
+	// +kubebuilder:validation:Optional
 	CurrentRender string `json:"currentRender"`
 	// ValidRender is the result of the validation of the workspace
+	// +kubebuilder:validation:Optional
 	ValidRender bool `json:"validRender"`
+
+	// CurrentContentHash is a hash of the .terraform directory content, used to detect
+	// changes in modules that are not evident in the workspace spec (e.g. git modules)
+	// +kubebuilder:validation:Optional
+	CurrentContentHash string `json:"currentContentHash"`
 	// NextRefreshTimestamp is the next time the workspace will be refreshed
 	// +kubebuilder:validation:Optional
 	NextRefreshTimestamp metav1.Time `json:"nextRefreshTimestamp"`
 	// ObservedGeneration is the observed generation of the workspace
+	// +kubebuilder:validation:Optional
 	ObservedGeneration int64 `json:"observedGeneration"`
+
+	// NewPlanNeeded indicates whether a new plan is needed
+	// +kubebuilder:validation:Optional
+	NewPlanNeeded bool `json:"newPlanNeeded"`
+
+	// NewApplyNeeded indicates whether a new apply is needed
+	// +kubebuilder:validation:Optional
+	NewApplyNeeded bool `json:"newApplyNeeded"`
+	// Terraform execution status
+	// TerraformPhase represents the current terraform execution phase
+	// +kubebuilder:validation:Optional
+	TerraformPhase string `json:"terraformPhase,omitempty"`
+	// TerraformMessage provides details about the current terraform operation
+	// +kubebuilder:validation:Optional
+	TerraformMessage string `json:"terraformMessage,omitempty"`
+	// HasChanges indicates whether the last plan contained changes
+	// +kubebuilder:validation:Optional
+	HasChanges bool `json:"hasChanges"`
+	// LastExecutionTime is the time the last terraform operation completed
+	// +kubebuilder:validation:Optional
+	LastExecutionTime *metav1.Time `json:"lastExecutionTime,omitempty"`
+	// LastPlanOutput contains the raw terraform plan output
+	// +kubebuilder:validation:Optional
+	LastPlanOutput string `json:"lastPlanOutput,omitempty"`
+	// LastApplyOutput contains the raw terraform apply output
+	// +kubebuilder:validation:Optional
+	LastApplyOutput string `json:"lastApplyOutput,omitempty"`
+
+	// LatestPlan is the name of the latest Plan resource created for this workspace
+	// +kubebuilder:deprecatedversion:warning="This field is deprecated and will be removed in a future release. Use CurrentPlan instead."
+	// +kubebuilder:validation:Optional
+	LatestPlan string `json:"latestPlan,omitempty"`
+}
+
+// PlanReference contains a reference to a Plan resource
+type PlanReference struct {
+	// Name of the Plan
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Namespace of the Plan, defaults to the same namespace as the Workspace
+	// +kubebuilder:validation:Optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // Workspace is the Schema for the workspaces API.

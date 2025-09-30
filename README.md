@@ -216,7 +216,7 @@ This project includes the following dependencies that are licensed under the Moz
 #### MPL Modifications
 
 If you change any MPL-2.0 files, you must distribute those modified files under the MPL-2.0.
-The full text of the MPL licenses can be found in the [LICENSES folder](LICENSES). Its recommended to look at the licenses stipulated in the repositories of the dependencies as listed above to make sure they are up to date.
+The full text of the MPL licenses can be found in the [LICENSES folder](LICENSES). It's recommended to look at the licenses stipulated in the repositories of the dependencies as listed above to make sure they are up to date.
 
 ## Contributions
 

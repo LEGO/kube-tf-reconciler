@@ -11,7 +11,7 @@ import (
 func TestRenderToFilesystem(t *testing.T) {
 	r := NewFileRender(t.TempDir())
 
-	res, err := r.Render(tfreconcilev1alpha1.Workspace{
+	res, err := r.Render(&tfreconcilev1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-workspace",
 			Namespace: "default",
@@ -69,7 +69,7 @@ func TestRenderLocalModule(t *testing.T) {
 		"my-test-module": []byte(localModule),
 	})
 
-	res, err := r.Render(tfreconcilev1alpha1.Workspace{
+	res, err := r.Render(&tfreconcilev1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-workspace",
 			Namespace: "default",
