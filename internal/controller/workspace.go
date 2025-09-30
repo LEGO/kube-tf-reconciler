@@ -282,7 +282,9 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfreconcilev1
 		applyOutput, err := r.executeTerraformApply(ctx, tf, false)
 		if err != nil {
 			log.Error(err, "failed to apply terraform", "workspace", ws.Name)
-			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to apply terraform: %v", err), nil)
+			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to apply terraform: %v", err), func(s *tfreconcilev1alpha1.WorkspaceStatus) {
+				s.LastApplyOutput = applyOutput
+			})
 
 			return ctrl.Result{}, err, true
 		}
