@@ -66,8 +66,13 @@ func TestWorkspaceController(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	localModule := `resource "random_pet" "name" {
-  length    = 2
+	localModule := `variable "pet_name_length" {
+  default = 2
+  type    = number
+}
+
+resource "random_pet" "name" {
+  length    = var.pet_name_length
   separator = "-"
 }
 `
@@ -215,5 +220,60 @@ func TestWorkspaceController(t *testing.T) {
 			resources.WithLabelSelector(fmt.Sprintf("%s=%s", workspacePlanLabel, resource.Name))),
 			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
 		assert.NoError(t, err)
+	})
+
+	t.Run("cleanup plans on passed history limit", func(t *testing.T) {
+		resource := &tfreconcilev1alpha1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-resource-history-limit-1",
+				Namespace: "default",
+			},
+			Spec: tfreconcilev1alpha1.WorkspaceSpec{
+				Backend: tfreconcilev1alpha1.BackendSpec{
+					Type: "local",
+				},
+				AutoApply:        false,
+				PreventDestroy:   false,
+				PlanHistoryLimit: 1,
+				TerraformVersion: "1.13.3",
+				ProviderSpecs: []tfreconcilev1alpha1.ProviderSpec{
+					{
+						Name:    "aws",
+						Version: ">= 5.63.1",
+						Source:  "hashicorp/aws",
+					},
+				},
+				Module: &tfreconcilev1alpha1.ModuleSpec{
+					Source: "my-module",
+					Name:   "my-module",
+				},
+			},
+		}
+		assert.NoError(t, k.Resources().Create(ctx, resource))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
+			d := object.(*tfreconcilev1alpha1.Workspace)
+			return d.Status.ObservedGeneration == d.Generation
+		}))
+		assert.NoError(t, err)
+
+		resource.Spec.Module.Inputs = testutils.Json(map[string]interface{}{
+			"pet_name_length": 3,
+		})
+		assert.NoError(t, k.Resources().Update(ctx, resource))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
+			d := object.(*tfreconcilev1alpha1.Workspace)
+			return d.Status.ObservedGeneration == d.Generation
+		}))
+		assert.NoError(t, err)
+
+		plans := &tfreconcilev1alpha1.PlanList{}
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 1,
+			resources.WithLabelSelector(fmt.Sprintf("%s=%s", workspacePlanLabel, resource.Name))),
+			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+
+		assert.Len(t, plans.Items, 1)
+		assert.Equal(t, 2, int(resource.Generation))
+		assert.Equal(t, fmt.Sprintf("%s-2", resource.Name), plans.Items[0].Name)
 	})
 }

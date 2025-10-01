@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,9 +47,6 @@ const (
 	TFPhaseApplying  = "Applying"
 	TFPhaseCompleted = "Completed"
 	TFPhaseErrored   = "Errored"
-
-	// PlanHistoryLimit defines how many old plans to keep as audit records
-	PlanHistoryLimit = 3
 
 	workspacePlanLabel = "tf-reconcile.lego.com/workspace"
 )
@@ -405,6 +404,11 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfreconc
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status during cleanup: %w", err), true
 	}
 
+	err = r.cleanupOldPlans(ctx, ws)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to cleanup old plans: %w", err), true
+	}
+
 	return ctrl.Result{}, nil, false
 }
 
@@ -540,6 +544,28 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfreconc
 	err = r.Client.Create(ctx, plan)
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("failed to create plan audit record: %w", err)
+	}
+
+	ctxTimeout, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	waitErr := wait.PollUntilContextTimeout(
+		ctxTimeout,
+		100*time.Millisecond,
+		2*time.Second,
+		true,
+		func(ctx context.Context) (done bool, err error) {
+			getErr := r.Client.Get(ctx, client.ObjectKeyFromObject(plan), plan)
+			if getErr == nil {
+				return true, nil
+			}
+			if apierrors.IsNotFound(getErr) {
+				return false, nil
+			}
+			return false, getErr
+		},
+	)
+	if waitErr != nil {
+		return nil, fmt.Errorf("plan not found after creation: %w", waitErr)
 	}
 
 	// The plan status must be updated in a separate call
@@ -693,4 +719,33 @@ func (r *WorkspaceReconciler) formatValidationDiagnostics(diagnostics []tfjson.D
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func (r *WorkspaceReconciler) cleanupOldPlans(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) error {
+	var planList tfreconcilev1alpha1.PlanList
+	err := r.Client.List(ctx, &planList, client.InNamespace(ws.Namespace), client.MatchingLabels{
+		workspacePlanLabel: ws.Name,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list plans for workspace %s: %w", ws.Name, err)
+	}
+
+	if len(planList.Items) <= int(ws.Spec.PlanHistoryLimit) {
+		return nil
+	}
+
+	plans := planList.Items
+	sort.Slice(plans, func(i, j int) bool {
+		return plans[i].CreationTimestamp.Time.Before(plans[j].CreationTimestamp.Time)
+	})
+
+	toDelete := plans[:len(plans)-int(ws.Spec.PlanHistoryLimit)]
+	for _, plan := range toDelete {
+		err := r.Client.Delete(ctx, &plan)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete old plan %s: %w", plan.Name, err)
+		}
+	}
+
+	return nil
 }

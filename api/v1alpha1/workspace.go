@@ -157,6 +157,13 @@ type WorkspaceSpec struct {
 	// Authentication is the authentication configuration for the workspace
 	// +kubebuilder:validation:Optional
 	Authentication *AuthenticationSpec `json:"authentication,omitempty"`
+
+	// PlanHistoryLimit is the number of plans to keep for the workspace
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=30
+	PlanHistoryLimit int32 `json:"planHistoryLimit,omitempty"`
 }
 
 // WorkspaceStatus defines the observed state of Workspace.
