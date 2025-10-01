@@ -3,7 +3,7 @@ namespace: "terraform-reconciler"
 
 image:
   repository: ghcr.io/lego/kube-tf-reconciler/kube-tf-reconciler
-  tag: sha-d549f8b
+  tag: sha-b85fdc8
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
