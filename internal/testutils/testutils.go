@@ -218,6 +218,10 @@ func WsCurrentGeneration(object k8s.Object) bool {
 	return workspace.Generation == workspace.Status.ObservedGeneration
 }
 
+func EventOwnedBy(name string) resources.ListOption {
+	return resources.WithFieldSelector(fmt.Sprintf("involvedObject.name=%s", name))
+}
+
 func IntegrationTest(t *testing.T) {
 	t.Helper()
 

@@ -24,7 +24,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/e2e-framework/klient"
-	"sigs.k8s.io/e2e-framework/klient/k8s"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
 	"sigs.k8s.io/e2e-framework/klient/wait"
 	"sigs.k8s.io/e2e-framework/klient/wait/conditions"
@@ -133,32 +132,22 @@ resource "random_pet" "name" {
 		}
 		assert.NoError(t, k8sClient.Create(ctx, resource))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
-			d := object.(*tfreconcilev1alpha1.Workspace)
-			return d.Status.ValidRender
-		}), wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
+		assert.NotEmpty(t, resource.Status.LastPlanOutput)
 
 		events := &v1.EventList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3,
-			resources.WithFieldSelector(fmt.Sprintf("involvedObject.name=%s", resource.Name))), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(resource.Name)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		var reasons []string
 		for _, e := range events.Items {
 			reasons = append(reasons, e.Reason)
 		}
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
-			d := object.(*tfreconcilev1alpha1.Workspace)
-			return d.Status.ObservedGeneration == d.Generation
-		}))
-		assert.NoError(t, err)
-		assert.NotEmpty(t, resource.Status.LastPlanOutput)
-
 		plans := &tfreconcilev1alpha1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0,
-			resources.WithLabelSelector(fmt.Sprintf("%s=%s", workspacePlanLabel, resource.Name))),
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)),
 			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
 		relevantPlan := plans.Items[0]
@@ -198,15 +187,11 @@ resource "random_pet" "name" {
 			},
 		}
 		assert.NoError(t, k.Resources().Create(ctx, resource))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
-			d := object.(*tfreconcilev1alpha1.Workspace)
-			return d.Status.ObservedGeneration == d.Generation
-		}))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		plans := &tfreconcilev1alpha1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0,
-			resources.WithLabelSelector(fmt.Sprintf("%s=%s", workspacePlanLabel, resource.Name))),
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)),
 			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
@@ -216,8 +201,7 @@ resource "random_pet" "name" {
 		assert.NoError(t, err)
 
 		emptyPlans := &tfreconcilev1alpha1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(emptyPlans, 0,
-			resources.WithLabelSelector(fmt.Sprintf("%s=%s", workspacePlanLabel, resource.Name))),
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(emptyPlans, 0, plansForWs(resource)),
 			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
 		assert.NoError(t, err)
 	})
@@ -250,10 +234,7 @@ resource "random_pet" "name" {
 			},
 		}
 		assert.NoError(t, k.Resources().Create(ctx, resource))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
-			d := object.(*tfreconcilev1alpha1.Workspace)
-			return d.Status.ObservedGeneration == d.Generation
-		}))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		resource.Spec.Module.Inputs = testutils.Json(map[string]interface{}{
@@ -261,19 +242,19 @@ resource "random_pet" "name" {
 		})
 		assert.NoError(t, k.Resources().Update(ctx, resource))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
-			d := object.(*tfreconcilev1alpha1.Workspace)
-			return d.Status.ObservedGeneration == d.Generation
-		}))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		plans := &tfreconcilev1alpha1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 1,
-			resources.WithLabelSelector(fmt.Sprintf("%s=%s", workspacePlanLabel, resource.Name))),
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(resource)),
 			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
 		assert.Equal(t, 2, int(resource.Generation))
 		assert.Equal(t, fmt.Sprintf("%s-2", resource.Name), plans.Items[0].Name)
 	})
+}
+
+func plansForWs(resource *tfreconcilev1alpha1.Workspace) resources.ListOption {
+	return resources.WithLabelSelector(fmt.Sprintf("%s=%s", workspacePlanLabel, resource.Name))
 }

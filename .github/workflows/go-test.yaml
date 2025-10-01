@@ -1,0 +1,41 @@
+name: Build and test application
+
+on:
+  pull_request:
+    paths:
+      - "**/*.go"
+      - go.mod
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.go"
+      - go.mod
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Dependencies
+        run: go tool setup-envtest use 1.32.0 --bin-dir bin/ -p path
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: |
+          go tool gotestsum --junitfile report.xml
+
+      - name: Test Summary
+        uses: test-summary/action@v2
+        with:
+          paths: "report.xml"
+        if: always()
