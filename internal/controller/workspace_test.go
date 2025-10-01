@@ -147,6 +147,7 @@ resource "random_pet" "name" {
 		plans := &tfreconcilev1alpha1.PlanList{}
 		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)),
 			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
 		relevantPlan := plans.Items[0]
