@@ -129,6 +129,14 @@ spec:
                 - name
                 - source
                 type: object
+              planHistoryLimit:
+                default: 3
+                description: PlanHistoryLimit is the number of plans to keep for the
+                  workspace
+                format: int32
+                maximum: 30
+                minimum: 1
+                type: integer
               preventDestroy:
                 default: true
                 description: PreventDestroy is a flag to indicate if terraform destroy
