@@ -730,7 +730,12 @@ func (r *WorkspaceReconciler) cleanupOldPlans(ctx context.Context, ws *tfreconci
 		return fmt.Errorf("failed to list plans for workspace %s: %w", ws.Name, err)
 	}
 
-	if len(planList.Items) <= int(ws.Spec.PlanHistoryLimit) {
+	limit := 3 // default
+	if ws.Spec.PlanHistoryLimit > 0 {
+		limit = int(ws.Spec.PlanHistoryLimit)
+	}
+
+	if len(planList.Items) <= limit {
 		return nil
 	}
 
