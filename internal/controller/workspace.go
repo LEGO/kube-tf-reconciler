@@ -33,6 +33,9 @@ import (
 const (
 	DebugLevel = 2
 
+	defaultPlanHistoryLimit = 3
+	planCreationTimeout     = 2 * time.Second
+
 	TFErrEventReason      = "TerraformError"
 	TFPlanEventReason     = "TerraformPlan"
 	TFApplyEventReason    = "TerraformApply"
@@ -546,13 +549,9 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfreconc
 		return nil, fmt.Errorf("failed to create plan audit record: %w", err)
 	}
 
-	ctxTimeout, cancel := context.WithTimeout(ctx, 2*time.Second)
+	ctxTimeout, cancel := context.WithTimeout(ctx, planCreationTimeout)
 	defer cancel()
-	waitErr := wait.PollUntilContextTimeout(
-		ctxTimeout,
-		100*time.Millisecond,
-		2*time.Second,
-		true,
+	waitErr := wait.PollUntilContextTimeout(ctxTimeout, 100*time.Millisecond, planCreationTimeout, true,
 		func(ctx context.Context) (done bool, err error) {
 			getErr := r.Client.Get(ctx, client.ObjectKeyFromObject(plan), plan)
 			if getErr == nil {
@@ -730,7 +729,7 @@ func (r *WorkspaceReconciler) cleanupOldPlans(ctx context.Context, ws *tfreconci
 		return fmt.Errorf("failed to list plans for workspace %s: %w", ws.Name, err)
 	}
 
-	limit := 3 // default
+	limit := defaultPlanHistoryLimit
 	if ws.Spec.PlanHistoryLimit > 0 {
 		limit = int(ws.Spec.PlanHistoryLimit)
 	}
