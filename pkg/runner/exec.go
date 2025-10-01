@@ -2,9 +2,13 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -73,10 +77,9 @@ func (e *Exec) SetupWorkspace(ws string) (string, error) {
 	return fullPath, nil
 }
 
-// SetupTerraformRC creates a .terraformrc file in the workspace directory if content is provided
 func (e *Exec) SetupTerraformRC(workspacePath string, terraformRCContent string) (string, error) {
 	if terraformRCContent == "" {
-		return "", nil // No custom .terraformrc provided
+		return "", nil
 	}
 
 	// Create the config file in the workspace's directory to isolate configuration
@@ -96,6 +99,7 @@ func (e *Exec) TerraformInit(ctx context.Context, tf *tfexec.Terraform, opts ...
 	err := tf.Init(ctx, opts...)
 	return err
 }
+
 func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) (string, error) {
 	e.terraformInstallMutex.Lock()
 	defer e.terraformInstallMutex.Unlock()
@@ -125,7 +129,7 @@ func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) 
 	return execPath, nil
 }
 
-func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws tfreconcilev1alpha1.Workspace) (*tfexec.Terraform, string, error) {
+func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (*tfexec.Terraform, string, error) {
 	path, err := e.SetupWorkspace(filepath.Join(ws.Namespace, ws.Name))
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to setup workspace: %w", err)
@@ -150,4 +154,57 @@ func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws tfreconcilev1alp
 	}
 
 	return tf, terraformRCPath, nil
+}
+
+func (e *Exec) CleanupWorkspace(ws *tfreconcilev1alpha1.Workspace) error {
+	workspacePath := filepath.Join(e.WorkspacesDir, ws.Namespace, ws.Name)
+
+	if _, err := os.Stat(workspacePath); os.IsNotExist(err) {
+		return nil
+	}
+
+	err := os.RemoveAll(workspacePath)
+	if err != nil {
+		return fmt.Errorf("failed to remove workspace directory %s: %w", workspacePath, err)
+	}
+
+	return nil
+}
+
+// CalculateChecksum computes a SHA256 checksum of .terraform
+// Expecting the workspace folders to be initialized already
+func (e *Exec) CalculateChecksum(ws *tfreconcilev1alpha1.Workspace) (string, error) {
+	var files []string
+	folder := filepath.Join(e.WorkspacesDir, ws.Namespace, ws.Name, ".terraform")
+	err := filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+
+	sort.Strings(files)
+
+	hasher := sha256.New()
+	for _, file := range files {
+		f, err := os.Open(file)
+		if err != nil {
+			return "", err
+		}
+
+		if _, err := io.Copy(hasher, f); err != nil {
+			_ = f.Close()
+			return "", err
+		}
+
+		_ = f.Close()
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }

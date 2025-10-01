@@ -14,7 +14,11 @@ Features
 
 ## Usage
 
-Create a Workspace resource:
+To deploy the operator, the recommended approach is using the provided Helm chart under /charts/terraform-reconciler
+
+After deploying the operator, get started by deploying a Workspace resource. A workspace is a completely self-contained Terraform execution environment, including the Terraform version, authentication, backend configuration, provider specifications, and module definitions.
+
+A simple example manifest would look like this:
 
 ```yaml
 apiVersion: tf-reconcile.lego.com/v1alpha1
@@ -53,6 +57,93 @@ spec:
       path: "/"
       description: "My example read-only policy"
       allowed_services: ["rds", "dynamo"]
+```
+
+### Authentication towards private module repositories
+
+If the Terraform module resides in a private repository (like a private GitHub repository), the workspace needs additional environment variables to use for authentication.
+
+```yaml
+apiVersion: tf-reconcile.lego.com/v1alpha1
+kind: Workspace
+metadata:
+  name: workspace1
+spec:
+  terraformVersion: 1.11.2
+  tf:
+    env:
+      - name: GIT_CONFIG_COUNT
+        value: "1"
+      - name: GIT_CONFIG_KEY_0
+        secretKeyRef:
+          name: github-credentials
+          key: github-token-url
+      - name: GIT_CONFIG_VALUE_0
+        value: "https://github.com/"
+```
+
+where the GitHub credentials would look like:
+```
+url.https://oauth2:github_pat_xxxxxxxx@github.com/.insteadOf
+```
+
+### Authentication towards cloud providers
+In the simple example above, authentication credentials are stored in a Kubernetes secret.
+A more secure approach however would be to set up OIDC authentication for your Kubernetes cluster and use service accounts with the appropriate permissions.
+
+For example, granting admin access in AWS would look something like this:
+
+```hcl
+resource "aws_iam_openid_connect_provider" "my_cluster" {
+  url = "cluster_url"
+  client_id_list = ["client_id"]
+  thumbprint_list = ["thumbprint"]
+}
+
+resource "aws_iam_role" "tf_reconciler_role" {
+  name = "terraform-reconciler-service-account-admin-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.my_cluster.arn
+        },
+        Action = "sts:AssumeRoleWithWebIdentity",
+        Condition = {
+          StringEquals = {
+            "cluster_url:sub" = "system:serviceaccount:namespace_name:service_account_name"
+          }
+        }
+      }
+    ]
+  })
+}
+
+data "aws_iam_policy" "admin" {
+  name = "AdministratorAccess"
+}
+
+resource "aws_iam_role_policy_attachment" "admin_policy_attachment" {
+  role       = aws_iam_role.tf_reconciler_role.name
+  policy_arn = data.aws_iam_policy.admin.arn
+}
+```
+
+Then, the Workspace can assume the role and access the necessary resources using the following parameters
+
+```yaml
+apiVersion: tf-reconcile.lego.com/v1alpha1
+kind: Workspace
+metadata:
+  name: workspace1
+spec:
+  authentication:
+    aws:
+      roleARN: arn:aws:iam::account_id:role/role_name
+      serviceAccountName: service_account_name
 ```
 
 ## Contributors Guide
@@ -125,7 +216,7 @@ This project includes the following dependencies that are licensed under the Moz
 #### MPL Modifications
 
 If you change any MPL-2.0 files, you must distribute those modified files under the MPL-2.0.
-The full text of the MPL licenses can be found in the [LICENSES folder](LICENSES). Its recommended to look at the licenses stipulated in the repositories of the dependencies as listed above to make sure they are up to date.
+The full text of the MPL licenses can be found in the [LICENSES folder](LICENSES). It's recommended to look at the licenses stipulated in the repositories of the dependencies as listed above to make sure they are up to date.
 
 ## Contributions
 

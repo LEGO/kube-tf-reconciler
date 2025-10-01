@@ -130,7 +130,7 @@ spec:
                 - source
                 type: object
               preventDestroy:
-                default: false
+                default: true
                 description: PreventDestroy is a flag to indicate if terraform destroy
                   should be skipped when the resource is deleted
                 type: boolean
@@ -226,12 +226,52 @@ spec:
           status:
             description: WorkspaceStatus defines the observed state of Workspace.
             properties:
+              currentContentHash:
+                description: |-
+                  CurrentContentHash is a hash of the .terraform directory content, used to detect
+                  changes in modules that are not evident in the workspace spec (e.g. git modules)
+                type: string
+              currentPlan:
+                description: CurrentPlan is a reference to the current Plan resource
+                properties:
+                  name:
+                    description: Name of the Plan
+                    type: string
+                  namespace:
+                    description: Namespace of the Plan, defaults to the same namespace
+                      as the Workspace
+                    type: string
+                required:
+                - name
+                type: object
               currentRender:
                 description: CurrentRender is the current render of the workspace
                 type: string
-              latestPlan:
-                description: LatestPlan is the latest plan of the workspace
+              hasChanges:
+                description: HasChanges indicates whether the last plan contained
+                  changes
+                type: boolean
+              lastApplyOutput:
+                description: LastApplyOutput contains the raw terraform apply output
                 type: string
+              lastExecutionTime:
+                description: LastExecutionTime is the time the last terraform operation
+                  completed
+                format: date-time
+                type: string
+              lastPlanOutput:
+                description: LastPlanOutput contains the raw terraform plan output
+                type: string
+              latestPlan:
+                description: LatestPlan is the name of the latest Plan resource created
+                  for this workspace
+                type: string
+              newApplyNeeded:
+                description: NewApplyNeeded indicates whether a new apply is needed
+                type: boolean
+              newPlanNeeded:
+                description: NewPlanNeeded indicates whether a new plan is needed
+                type: boolean
               nextRefreshTimestamp:
                 description: NextRefreshTimestamp is the next time the workspace will
                   be refreshed
@@ -242,14 +282,18 @@ spec:
                   workspace
                 format: int64
                 type: integer
+              terraformMessage:
+                description: TerraformMessage provides details about the current terraform
+                  operation
+                type: string
+              terraformPhase:
+                description: |-
+                  Terraform execution status
+                  TerraformPhase represents the current terraform execution phase
+                type: string
               validRender:
                 description: ValidRender is the result of the validation of the workspace
                 type: boolean
-            required:
-            - currentRender
-            - latestPlan
-            - observedGeneration
-            - validRender
             type: object
         type: object
     served: true

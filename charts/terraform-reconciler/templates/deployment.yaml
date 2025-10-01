@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Values.appName }}
-  namespace: {{ .Values.namespace }}
 spec:
   replicas: 1
   selector:
@@ -17,9 +16,8 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
-      {{- if .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
       volumes:
         - name: terraform-data
