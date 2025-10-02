@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	DebugLevel = 0
+	DebugLevel = 2
 
 	defaultPlanHistoryLimit = 3
 	planCreationTimeout     = 2 * time.Second
