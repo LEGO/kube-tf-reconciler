@@ -61,6 +61,37 @@ spec:
                     - roleARN
                     - serviceAccountName
                     type: object
+                  tokens:
+                    description: Tokens authentication configuration
+                    items:
+                      description: TokenAuthConfig defines the token authentication
+                        configuration for arbitrary tokens used for authentication
+                      properties:
+                        filePathEnv:
+                          description: FilePathEnv is the environment variable to
+                            set with the temporary path to the token file
+                          type: string
+                        secretKeyRef:
+                          description: SecretKeyRef is a reference to a secret containing
+                            a token for authentication
+                          properties:
+                            key:
+                              description: The Key of the secret to select from. Must
+                                be a valid secret key.
+                              type: string
+                            name:
+                              description: The Name of the secret in the Workspace
+                                namespace to select from.
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                      required:
+                      - filePathEnv
+                      - secretKeyRef
+                      type: object
+                    type: array
                 type: object
               autoApply:
                 default: false

@@ -113,11 +113,26 @@ type AWSAuthConfig struct {
 	RoleARN string `json:"roleARN"`
 }
 
+// TokenAuthConfig defines the token authentication configuration for arbitrary tokens used for authentication
+type TokenAuthConfig struct {
+	// SecretKeyRef is a reference to a secret containing a token for authentication
+	// +kubebuilder:validation:Required
+	SecretKeyRef SecretKeySelector `json:"secretKeyRef"`
+
+	// FilePathEnv is the environment variable to set with the temporary path to the token file
+	// +kubebuilder:validation:Required
+	FilePathEnv string `json:"filePathEnv"`
+}
+
 // AuthenticationSpec defines the authentication configuration for the workspace
 type AuthenticationSpec struct {
 	// AWS authentication configuration
 	// +kubebuilder:validation:Optional
 	AWS *AWSAuthConfig `json:"aws,omitempty"`
+
+	// Tokens authentication configuration
+	// +kubebuilder:validation:Optional
+	Tokens []TokenAuthConfig `json:"tokens,omitempty"`
 }
 
 // WorkspaceSpec defines the desired state of Workspace.

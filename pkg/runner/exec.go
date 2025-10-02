@@ -67,8 +67,8 @@ func New(rootDir string) *Exec {
 	}
 }
 
-func (e *Exec) SetupWorkspace(ws string) (string, error) {
-	fullPath := filepath.Join(e.WorkspacesDir, ws)
+func (e *Exec) SetupWorkspace(ws *tfreconcilev1alpha1.Workspace) (string, error) {
+	fullPath := filepath.Join(e.WorkspacesDir, ws.Namespace, ws.Name)
 	err := os.MkdirAll(fullPath, 0755)
 	if err != nil {
 		return "", fmt.Errorf("failed to create workspace dir: %w", err)
@@ -130,7 +130,7 @@ func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) 
 }
 
 func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (*tfexec.Terraform, string, error) {
-	path, err := e.SetupWorkspace(filepath.Join(ws.Namespace, ws.Name))
+	path, err := e.SetupWorkspace(ws)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to setup workspace: %w", err)
 	}
