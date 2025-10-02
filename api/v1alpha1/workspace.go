@@ -5,6 +5,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	ManualApplyAnnotation = "tf-reconcile.lego.com/manual-apply"
+	WorkspacePlanLabel    = "tf-reconcile.lego.com/workspace"
+	WorkspaceFinalizer    = "tf-reconcile.lego.com/finalizer"
+)
+
 // BackendSpec defines the backend configuration for the workspace
 type BackendSpec struct {
 	// Type is the type of the backend
@@ -242,6 +248,11 @@ type Workspace struct {
 
 	Spec   WorkspaceSpec   `json:"spec,omitempty"`
 	Status WorkspaceStatus `json:"status,omitempty"`
+}
+
+func (w *Workspace) ManualApplyRequested() bool {
+	_, ok := w.Annotations[ManualApplyAnnotation]
+	return ok
 }
 
 // WorkspaceList contains a list of Workspace.
