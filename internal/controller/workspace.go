@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -597,46 +598,39 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfreconc
 
 // getEnvsForExecution gets environment variables for terraform execution
 func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (map[string]string, error) {
-	if ws.Spec.TFExec == nil {
-		return map[string]string{}, nil
-	}
-	if ws.Spec.TFExec.Env == nil {
-		return map[string]string{}, nil
-	}
 	envs := make(map[string]string)
-	for _, env := range ws.Spec.TFExec.Env {
-		if env.Name == "" {
-			continue
-		}
-		if env.Value != "" {
-			envs[env.Name] = env.Value
-			continue
-		}
-		if env.ConfigMapKeyRef != nil {
-			var cm v1.ConfigMap
-			err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: env.ConfigMapKeyRef.Name}, &cm)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get configmap %s: %w", env.ConfigMapKeyRef.Name, err)
-			}
-			if val, ok := cm.Data[env.ConfigMapKeyRef.Key]; ok {
-				envs[env.Name] = val
+
+	if ws.Spec.TFExec != nil && ws.Spec.TFExec.Env != nil {
+		for _, env := range ws.Spec.TFExec.Env {
+			if env.Name == "" {
 				continue
 			}
-		}
-		if env.SecretKeyRef != nil {
-			var secret v1.Secret
-			err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: env.SecretKeyRef.Name}, &secret)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get secret %s: %w", env.SecretKeyRef.Name, err)
+			if env.Value != "" {
+				envs[env.Name] = env.Value
+				continue
 			}
-			if val, ok := secret.Data[env.SecretKeyRef.Key]; ok {
-				envs[env.Name] = string(val)
+			if env.ConfigMapKeyRef != nil {
+				var cm v1.ConfigMap
+				err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: env.ConfigMapKeyRef.Name}, &cm)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get configmap %s: %w", env.ConfigMapKeyRef.Name, err)
+				}
+				if val, ok := cm.Data[env.ConfigMapKeyRef.Key]; ok {
+					envs[env.Name] = val
+					continue
+				}
+			}
+			if env.SecretKeyRef != nil {
+				value, err := r.getSecretFromRef(ctx, ws, env.SecretKeyRef)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get secret for env %s: %w", env.Name, err)
+				}
+				envs[env.Name] = value
 				continue
 			}
 		}
 	}
 
-	// Handle AWS authentication with service account tokens
 	if ws.Spec.Authentication != nil {
 		if ws.Spec.Authentication.AWS != nil {
 			if ws.Spec.Authentication.AWS.ServiceAccountName != "" || ws.Spec.Authentication.AWS.RoleARN != "" {
@@ -647,6 +641,27 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfrec
 
 				envs["AWS_WEB_IDENTITY_TOKEN_FILE"] = tempTokenPath
 				envs["AWS_ROLE_ARN"] = ws.Spec.Authentication.AWS.RoleARN
+			}
+		}
+
+		if ws.Spec.Authentication.Tokens != nil {
+			wsPath, err := r.Tf.SetupWorkspace(ws)
+			if err != nil {
+				return nil, fmt.Errorf("failed to setup workspace for token files: %w", err)
+			}
+			for _, token := range ws.Spec.Authentication.Tokens {
+				value, err := r.getSecretFromRef(ctx, ws, &token.SecretKeyRef)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get token for env %s: %w", token.FilePathEnv, err)
+				}
+
+				tokenFilePath := filepath.Join(wsPath, fmt.Sprintf("%s-token", strings.ToLower(token.FilePathEnv)))
+				err = os.WriteFile(tokenFilePath, []byte(value), 0600)
+				if err != nil {
+					return nil, fmt.Errorf("failed to write token file for env %s: %w", token.FilePathEnv, err)
+				}
+
+				envs[token.FilePathEnv] = tokenFilePath
 			}
 		}
 	}
@@ -662,7 +677,7 @@ func (r *WorkspaceReconciler) setupAWSAuthentication(ctx context.Context, ws *tf
 		Name:      ws.Spec.Authentication.AWS.ServiceAccountName,
 	}, &sa)
 	if err != nil {
-		return "", fmt.Errorf("failed to get service account %s in namespace %s: %w",
+		return "", fmt.Errorf("failed to get service account (%s) in namespace (%s): %w",
 			ws.Spec.Authentication.AWS.ServiceAccountName, ws.Namespace, err)
 	}
 
@@ -677,18 +692,18 @@ func (r *WorkspaceReconciler) setupAWSAuthentication(ctx context.Context, ws *tf
 		return "", fmt.Errorf("failed to create token for service account %s: %w",
 			ws.Spec.Authentication.AWS.ServiceAccountName, err)
 	}
-	tokenFile, err := os.CreateTemp("", fmt.Sprintf("aws-token-%s-%s-*", ws.Namespace, ws.Name))
+	wsPath, err := r.Tf.SetupWorkspace(ws)
+	if err != nil {
+		return "", fmt.Errorf("failed to setup workspace for aws token file: %w", err)
+	}
+
+	path := filepath.Join(wsPath, "aws-token")
+	err = os.WriteFile(path, []byte(tokenRequest.Status.Token), 0600)
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp token file: %w", err)
 	}
-	defer tokenFile.Close()
 
-	if _, err := tokenFile.Write([]byte(tokenRequest.Status.Token)); err != nil {
-		os.Remove(tokenFile.Name())
-		return "", fmt.Errorf("failed to write token to temp file: %w", err)
-	}
-
-	return tokenFile.Name(), nil
+	return path, nil
 }
 
 // formatValidationDiagnostics formats terraform validation diagnostics into a detailed error message
@@ -718,6 +733,20 @@ func (r *WorkspaceReconciler) formatValidationDiagnostics(diagnostics []tfjson.D
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func (r *WorkspaceReconciler) getSecretFromRef(ctx context.Context, ws *tfreconcilev1alpha1.Workspace, ref *tfreconcilev1alpha1.SecretKeySelector) (string, error) {
+	var secret v1.Secret
+	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ref.Name}, &secret)
+	if err != nil {
+		return "", fmt.Errorf("failed to get secret %s: %w", ref.Name, err)
+	}
+	value, ok := secret.Data[ref.Key]
+	if !ok {
+		return "", fmt.Errorf("key %s not found in secret %s", ref.Key, ref.Name)
+	}
+
+	return string(value), nil
 }
 
 func (r *WorkspaceReconciler) cleanupOldPlans(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) error {
