@@ -19,7 +19,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -37,7 +36,6 @@ func init() {
 
 func TestWorkspaceController(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
 
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{testutils.CRDFolder()},
@@ -52,8 +50,6 @@ func TestWorkspaceController(t *testing.T) {
 	cfg, err := testEnv.Start()
 	assert.NoError(t, err)
 	assert.NotNil(t, cfg)
-	k8sClient, err := client.New(cfg, client.Options{Scheme: testEnv.Scheme})
-	assert.NoError(t, err)
 	k, err := klient.New(cfg)
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
@@ -101,6 +97,9 @@ resource "random_pet" "name" {
 	})
 
 	t.Run("creating the custom resource for the Kind Workspace", func(t *testing.T) {
+		t.Parallel()
+		ctx = t.Context()
+
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-creation",
@@ -131,7 +130,7 @@ resource "random_pet" "name" {
 				},
 			},
 		}
-		assert.NoError(t, k8sClient.Create(ctx, resource))
+		assert.NoError(t, k.Resources().Create(ctx, resource))
 
 		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
@@ -162,6 +161,9 @@ resource "random_pet" "name" {
 	})
 
 	t.Run("manual apply request", func(t *testing.T) {
+		t.Parallel()
+		ctx = t.Context()
+
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-manual-apply",
@@ -192,7 +194,7 @@ resource "random_pet" "name" {
 				},
 			},
 		}
-		assert.NoError(t, k8sClient.Create(ctx, resource))
+		assert.NoError(t, k.Resources().Create(ctx, resource))
 
 		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
@@ -200,7 +202,7 @@ resource "random_pet" "name" {
 		resource.Annotations = map[string]string{
 			tfv1alphav1.ManualApplyAnnotation: "true",
 		}
-		assert.NoError(t, k8sClient.Update(ctx, resource))
+		assert.NoError(t, k.Resources().Update(ctx, resource))
 
 		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
 			_, ok := object.GetAnnotations()[tfv1alphav1.ManualApplyAnnotation]
@@ -233,6 +235,9 @@ resource "random_pet" "name" {
 	})
 
 	t.Run("cleanup plans on deletion", func(t *testing.T) {
+		t.Parallel()
+		ctx = t.Context()
+
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-cleanup",
@@ -279,6 +284,9 @@ resource "random_pet" "name" {
 	})
 
 	t.Run("cleanup plans on passed history limit", func(t *testing.T) {
+		t.Parallel()
+		ctx = t.Context()
+
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-history-limit-1",
