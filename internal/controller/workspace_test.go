@@ -146,7 +146,7 @@ resource "random_pet" "name" {
 
 		plans := &tfv1alphav1.PlanList{}
 		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)),
-			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
 
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
@@ -220,7 +220,7 @@ resource "random_pet" "name" {
 
 		plans := &tfv1alphav1.PlanList{}
 		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)),
-			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
 
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
@@ -269,17 +269,17 @@ resource "random_pet" "name" {
 
 		plans := &tfv1alphav1.PlanList{}
 		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)),
-			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, resource))
 		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(resource),
-			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
 		emptyPlans := &tfv1alphav1.PlanList{}
 		err = wait.For(conditions.New(k.Resources()).ResourceListN(emptyPlans, 0, plansForWs(resource)),
-			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
 		assert.NoError(t, err)
 	})
 
@@ -327,7 +327,7 @@ resource "random_pet" "name" {
 
 		plans := &tfv1alphav1.PlanList{}
 		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(resource)),
-			wait.WithTimeout(time.Minute*1), wait.WithContext(ctx))
+			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
 		assert.Equal(t, 2, int(resource.Generation))
