@@ -73,7 +73,7 @@ resource "random_pet" "name" {
 }
 `
 
-	rootDir := testutils.TestDataFolder()
+	rootDir := t.TempDir() // testutils.TestDataFolder() // Enable to better introspection into test data
 	t.Logf("using root dir: %s", rootDir)
 	err = (&WorkspaceReconciler{
 		Client:   mgr.GetClient(),
