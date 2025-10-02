@@ -281,6 +281,7 @@ resource "random_pet" "name" {
 		err = wait.For(conditions.New(k.Resources()).ResourceListN(emptyPlans, 0, plansForWs(resource)),
 			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
 		assert.NoError(t, err)
+		assert.Empty(t, emptyPlans.Items)
 	})
 
 	t.Run("cleanup plans on passed history limit", func(t *testing.T) {

@@ -24,6 +24,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Download dependencies
+        run: go mod download
+
       - name: Setup Dependencies
         run: go tool setup-envtest use 1.32.0 --bin-dir bin/ -p path
 
