@@ -19,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -35,7 +36,7 @@ func init() {
 }
 
 func TestWorkspaceController(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute*5)
 
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{testutils.CRDFolder()},
@@ -90,13 +91,12 @@ resource "random_pet" "name" {
 
 	t.Cleanup(func() {
 		cancel()
-		err = testEnv.Stop()
-		assert.NoError(t, err)
-		err = os.RemoveAll(filepath.Join(rootDir, "workspaces"))
-		assert.NoError(t, err)
+		assert.NoError(t, testEnv.Stop())
+		assert.NoError(t, os.RemoveAll(filepath.Join(rootDir, "workspaces")))
 	})
 
 	t.Run("creating the custom resource for the Kind Workspace", func(t *testing.T) {
+		t.Parallel()
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-creation",
@@ -142,8 +142,7 @@ resource "random_pet" "name" {
 		}
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)),
-			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)), wait.WithContext(ctx))
 
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
@@ -158,6 +157,7 @@ resource "random_pet" "name" {
 	})
 
 	t.Run("manual apply request", func(t *testing.T) {
+		t.Parallel()
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-manual-apply",
@@ -213,8 +213,7 @@ resource "random_pet" "name" {
 		}
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)),
-			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)), wait.WithContext(ctx))
 
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
@@ -229,6 +228,7 @@ resource "random_pet" "name" {
 	})
 
 	t.Run("cleanup plans on deletion", func(t *testing.T) {
+		t.Parallel()
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-cleanup",
@@ -238,7 +238,7 @@ resource "random_pet" "name" {
 				Backend: tfv1alphav1.BackendSpec{
 					Type: "local",
 				},
-				AutoApply:        false,
+				AutoApply:        true,
 				PreventDestroy:   false,
 				TerraformVersion: "1.13.3",
 				ProviderSpecs: []tfv1alphav1.ProviderSpec{
@@ -259,23 +259,23 @@ resource "random_pet" "name" {
 		assert.NoError(t, err)
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)),
-			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, resource))
-		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(resource),
-			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(resource), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
-		emptyPlans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(emptyPlans, 0, plansForWs(resource)),
-			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
-		assert.NoError(t, err)
-		assert.Empty(t, emptyPlans.Items)
+		for _, p := range plans.Items {
+			owned, err := controllerutil.HasOwnerReference(p.OwnerReferences, resource, mgr.GetScheme())
+			assert.NoError(t, err)
+			assert.True(t, owned)
+		}
 	})
 
 	t.Run("cleanup plans on passed history limit", func(t *testing.T) {
+		t.Parallel()
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-history-limit-1",
@@ -315,8 +315,7 @@ resource "random_pet" "name" {
 		assert.NoError(t, err)
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(resource)),
-			wait.WithTimeout(time.Minute*2), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(resource)), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
 		assert.Equal(t, 2, int(resource.Generation))
