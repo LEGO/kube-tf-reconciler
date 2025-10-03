@@ -97,9 +97,6 @@ resource "random_pet" "name" {
 	})
 
 	t.Run("creating the custom resource for the Kind Workspace", func(t *testing.T) {
-		t.Parallel()
-		ctx = t.Context()
-
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-creation",
@@ -161,9 +158,6 @@ resource "random_pet" "name" {
 	})
 
 	t.Run("manual apply request", func(t *testing.T) {
-		t.Parallel()
-		ctx = t.Context()
-
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-manual-apply",
@@ -235,9 +229,6 @@ resource "random_pet" "name" {
 	})
 
 	t.Run("cleanup plans on deletion", func(t *testing.T) {
-		t.Parallel()
-		ctx = t.Context()
-
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-cleanup",
@@ -285,9 +276,6 @@ resource "random_pet" "name" {
 	})
 
 	t.Run("cleanup plans on passed history limit", func(t *testing.T) {
-		t.Parallel()
-		ctx = t.Context()
-
 		resource := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-resource-history-limit-1",
