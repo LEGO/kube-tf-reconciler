@@ -15,6 +15,7 @@ import (
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
@@ -52,6 +53,7 @@ func TestWorkspaceController(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, cfg)
 	k, err := klient.New(cfg)
+	assert.NoError(t, err)
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 testEnv.Scheme,
@@ -91,50 +93,25 @@ resource "random_pet" "name" {
 
 	t.Cleanup(func() {
 		cancel()
-		assert.NoError(t, testEnv.Stop())
-		assert.NoError(t, os.RemoveAll(filepath.Join(rootDir, "workspaces")))
+		err = testEnv.Stop()
+		assert.NoError(t, err)
+		err = os.RemoveAll(filepath.Join(rootDir, "workspaces"))
+		assert.NoError(t, err)
 	})
 
 	t.Run("creating the custom resource for the Kind Workspace", func(t *testing.T) {
 		t.Parallel()
-		resource := &tfv1alphav1.Workspace{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-resource-creation",
-				Namespace: "default",
-			},
-			Spec: tfv1alphav1.WorkspaceSpec{
-				Backend: tfv1alphav1.BackendSpec{
-					Type: "local",
-				},
-				AutoApply:        true,
-				PreventDestroy:   false,
-				TerraformVersion: "1.13.3",
-				ProviderSpecs: []tfv1alphav1.ProviderSpec{
-					{
-						Name:    "aws",
-						Version: ">= 5.63.1",
-						Source:  "hashicorp/aws",
-					},
-					{
-						Name:    "random",
-						Version: "3.7.2",
-						Source:  "hashicorp/random",
-					},
-				},
-				Module: &tfv1alphav1.ModuleSpec{
-					Source: "my-module",
-					Name:   "my-module",
-				},
-			},
-		}
-		assert.NoError(t, k.Resources().Create(ctx, resource))
+		ws := newWs("test-resource-creation")
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
-		assert.NotEmpty(t, resource.Status.LastPlanOutput)
+		assert.NotEmpty(t, ws.Status.LastPlanOutput)
 
 		events := &v1.EventList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(resource.Name)), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		var reasons []string
 		for _, e := range events.Items {
@@ -142,10 +119,10 @@ resource "random_pet" "name" {
 		}
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.NoError(t, err)
-		assert.Len(t, plans.Items, 1)
+		require.Len(t, plans.Items, 1)
 		relevantPlan := plans.Items[0]
 		assert.Equal(t, tfv1alphav1.PlanPhaseApplied, relevantPlan.Status.Phase)
 		assert.NotEmpty(t, relevantPlan.Status.ApplyOutput)
@@ -227,48 +204,74 @@ resource "random_pet" "name" {
 		assert.Contains(t, reasons, TFValidateEventReason)
 	})
 
-	t.Run("cleanup plans on deletion", func(t *testing.T) {
+	t.Run("authenticate with generic token", func(t *testing.T) {
 		t.Parallel()
-		resource := &tfv1alphav1.Workspace{
+		err = k.Resources().Create(ctx, &v1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-resource-cleanup",
+				Name:      "my-secret",
 				Namespace: "default",
 			},
-			Spec: tfv1alphav1.WorkspaceSpec{
-				Backend: tfv1alphav1.BackendSpec{
-					Type: "local",
-				},
-				AutoApply:        true,
-				PreventDestroy:   false,
-				TerraformVersion: "1.13.3",
-				ProviderSpecs: []tfv1alphav1.ProviderSpec{
-					{
-						Name:    "aws",
-						Version: ">= 5.63.1",
-						Source:  "hashicorp/aws",
+			Data: map[string][]byte{
+				"token": []byte("token content string blip blop"),
+			},
+		})
+		assert.NoError(t, err)
+
+		err = k.Resources().Create(ctx, &v1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "default",
+				Namespace: "default",
+			},
+		})
+		assert.NoError(t, err)
+
+		ws := newWs("test-resource-generic-token")
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = false
+		ws.Spec.Authentication = &tfv1alphav1.AuthenticationSpec{
+			Tokens: []tfv1alphav1.TokenAuthConfig{
+				{
+					SecretKeyRef: tfv1alphav1.SecretKeySelector{
+						Name: "my-secret",
+						Key:  "token",
 					},
-				},
-				Module: &tfv1alphav1.ModuleSpec{
-					Source: "my-module",
-					Name:   "my-module",
+					FilePathEnv: "AWS_TOKEN_FILE",
 				},
 			},
+			AWS: &tfv1alphav1.AWSAuthConfig{
+				ServiceAccountName: "default",
+				RoleARN:            "test-arn",
+			},
 		}
-		assert.NoError(t, k.Resources().Create(ctx, resource))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
+
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		assert.NoError(t, err)
+		assert.FileExists(t, filepath.Join(rootDir, "workspaces", ws.Namespace, ws.Name, "aws_token_file-token"))
+		assert.FileExists(t, filepath.Join(rootDir, "workspaces", ws.Namespace, ws.Name, "aws-token"))
+	})
+
+	t.Run("cleanup plans on deletion", func(t *testing.T) {
+		t.Parallel()
+		ws := newWs("test-resource-cleanup")
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = false
+
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
-		assert.NoError(t, k.Resources().Delete(ctx, resource))
-
-		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(resource), wait.WithContext(ctx))
+		assert.NoError(t, k.Resources().Delete(ctx, ws))
+		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
 		for _, p := range plans.Items {
-			owned, err := controllerutil.HasOwnerReference(p.OwnerReferences, resource, mgr.GetScheme())
+			owned, err := controllerutil.HasOwnerReference(p.OwnerReferences, ws, mgr.GetScheme())
 			assert.NoError(t, err)
 			assert.True(t, owned)
 		}
@@ -276,53 +279,65 @@ resource "random_pet" "name" {
 
 	t.Run("cleanup plans on passed history limit", func(t *testing.T) {
 		t.Parallel()
-		resource := &tfv1alphav1.Workspace{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-resource-history-limit-1",
-				Namespace: "default",
-			},
-			Spec: tfv1alphav1.WorkspaceSpec{
-				Backend: tfv1alphav1.BackendSpec{
-					Type: "local",
-				},
-				AutoApply:        false,
-				PreventDestroy:   false,
-				PlanHistoryLimit: 1,
-				TerraformVersion: "1.13.3",
-				ProviderSpecs: []tfv1alphav1.ProviderSpec{
-					{
-						Name:    "aws",
-						Version: ">= 5.63.1",
-						Source:  "hashicorp/aws",
-					},
-				},
-				Module: &tfv1alphav1.ModuleSpec{
-					Source: "my-module",
-					Name:   "my-module",
-				},
-			},
-		}
-		assert.NoError(t, k.Resources().Create(ctx, resource))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
+		ws := newWs("test-resource-history-limit-1")
+		ws.Spec.AutoApply = false
+		ws.Spec.PreventDestroy = false
+		ws.Spec.PlanHistoryLimit = 1
+
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
-		resource.Spec.Module.Inputs = testutils.Json(map[string]interface{}{
+		ws.Spec.Module.Inputs = testutils.Json(map[string]interface{}{
 			"pet_name_length": 3,
 		})
-		assert.NoError(t, k.Resources().Update(ctx, resource))
+		assert.NoError(t, k.Resources().Update(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(resource)), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
-		assert.Equal(t, 2, int(resource.Generation))
-		assert.Equal(t, fmt.Sprintf("%s-2", resource.Name), plans.Items[0].Name)
+		assert.Equal(t, 2, int(ws.Generation))
+		assert.Equal(t, fmt.Sprintf("%s-2", ws.Name), plans.Items[0].Name)
 	})
 }
 
-func plansForWs(resource *tfv1alphav1.Workspace) resources.ListOption {
-	return resources.WithLabelSelector(fmt.Sprintf("%s=%s", tfv1alphav1.WorkspacePlanLabel, resource.Name))
+func plansForWs(ws *tfv1alphav1.Workspace) resources.ListOption {
+	return resources.WithLabelSelector(fmt.Sprintf("%s=%s", tfv1alphav1.WorkspacePlanLabel, ws.Name))
+}
+
+func newWs(name string) *tfv1alphav1.Workspace {
+	return &tfv1alphav1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+		},
+		Spec: tfv1alphav1.WorkspaceSpec{
+			Backend: tfv1alphav1.BackendSpec{
+				Type: "local",
+			},
+			AutoApply:        true,
+			PreventDestroy:   true,
+			TerraformVersion: "1.13.3",
+			ProviderSpecs: []tfv1alphav1.ProviderSpec{
+				{
+					Name:    "aws",
+					Version: ">= 5.63.1",
+					Source:  "hashicorp/aws",
+				},
+				{
+					Name:    "random",
+					Version: "3.7.2",
+					Source:  "hashicorp/random",
+				},
+			},
+			Module: &tfv1alphav1.ModuleSpec{
+				Source: "my-module",
+				Name:   "my-module",
+			},
+		},
+	}
 }
