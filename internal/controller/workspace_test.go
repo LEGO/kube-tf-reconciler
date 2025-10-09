@@ -45,6 +45,8 @@ func TestWorkspaceController(t *testing.T) {
 		Scheme:                k8sscheme.Scheme,
 	}
 
+	modHost, shutdown := testutils.NewModuleHost()
+
 	err := tfv1alphav1.AddToScheme(testEnv.Scheme)
 	assert.NoError(t, err)
 
@@ -73,6 +75,7 @@ resource "random_pet" "name" {
   separator = "-"
 }
 `
+	modHost.AddFileToModule("my-module", "main.tf", localModule)
 
 	rootDir := t.TempDir() // testutils.TestDataFolder() // Enable to better introspection into test data
 	t.Logf("using root dir: %s", rootDir)
@@ -81,16 +84,15 @@ resource "random_pet" "name" {
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("krec"),
 
-		Tf: runner.New(rootDir),
-		Renderer: render.NewLocalModuleRenderer(rootDir, map[string][]byte{
-			"my-module": []byte(localModule),
-		}),
+		Tf:       runner.New(rootDir),
+		Renderer: render.NewFileRender(rootDir),
 	}).SetupWithManager(mgr)
 
 	go mgr.Start(ctx)
 
 	t.Cleanup(func() {
 		cancel()
+		shutdown()
 		assert.NoError(t, testEnv.Stop())
 		assert.NoError(t, os.RemoveAll(filepath.Join(rootDir, "workspaces")))
 	})
@@ -122,7 +124,7 @@ resource "random_pet" "name" {
 					},
 				},
 				Module: &tfv1alphav1.ModuleSpec{
-					Source: "my-module",
+					Source: modHost.ModuleSource("my-module"),
 					Name:   "my-module",
 				},
 			},
