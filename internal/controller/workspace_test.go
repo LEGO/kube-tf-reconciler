@@ -46,6 +46,8 @@ func TestWorkspaceController(t *testing.T) {
 		Scheme:                k8sscheme.Scheme,
 	}
 
+	modHost, shutdown := testutils.NewModuleHost()
+
 	err := tfv1alphav1.AddToScheme(testEnv.Scheme)
 	assert.NoError(t, err)
 
@@ -75,6 +77,7 @@ resource "random_pet" "name" {
   separator = "-"
 }
 `
+	modHost.AddFileToModule("my-module", "main.tf", localModule)
 
 	rootDir := t.TempDir() // testutils.TestDataFolder() // Enable to better introspection into test data
 	t.Logf("using root dir: %s", rootDir)
@@ -83,25 +86,22 @@ resource "random_pet" "name" {
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("krec"),
 
-		Tf: runner.New(rootDir),
-		Renderer: render.NewLocalModuleRenderer(rootDir, map[string][]byte{
-			"my-module": []byte(localModule),
-		}),
+		Tf:       runner.New(rootDir),
+		Renderer: render.NewFileRender(rootDir),
 	}).SetupWithManager(mgr)
 
 	go mgr.Start(ctx)
 
 	t.Cleanup(func() {
 		cancel()
-		err = testEnv.Stop()
-		assert.NoError(t, err)
-		err = os.RemoveAll(filepath.Join(rootDir, "workspaces"))
-		assert.NoError(t, err)
+		shutdown()
+		assert.NoError(t, testEnv.Stop())
+		assert.NoError(t, os.RemoveAll(filepath.Join(rootDir, "workspaces")))
 	})
 
 	t.Run("creating the custom resource for the Kind Workspace", func(t *testing.T) {
 		t.Parallel()
-		ws := newWs("test-resource-creation")
+		ws := newWs("test-resource-creation", modHost.ModuleSource("my-module"))
 		ws.Spec.PreventDestroy = false
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
@@ -135,54 +135,27 @@ resource "random_pet" "name" {
 
 	t.Run("manual apply request", func(t *testing.T) {
 		t.Parallel()
-		resource := &tfv1alphav1.Workspace{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-resource-manual-apply",
-				Namespace: "default",
-			},
-			Spec: tfv1alphav1.WorkspaceSpec{
-				Backend: tfv1alphav1.BackendSpec{
-					Type: "local",
-				},
-				AutoApply:        false,
-				PreventDestroy:   false,
-				TerraformVersion: "1.13.3",
-				ProviderSpecs: []tfv1alphav1.ProviderSpec{
-					{
-						Name:    "aws",
-						Version: ">= 5.63.1",
-						Source:  "hashicorp/aws",
-					},
-					{
-						Name:    "random",
-						Version: "3.7.2",
-						Source:  "hashicorp/random",
-					},
-				},
-				Module: &tfv1alphav1.ModuleSpec{
-					Source: "my-module",
-					Name:   "my-module",
-				},
-			},
-		}
-		assert.NoError(t, k.Resources().Create(ctx, resource))
+		ws := newWs("test-resource-manual-apply", modHost.ModuleSource("my-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = false
+		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, testutils.WsCurrentGeneration))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
-		resource.Annotations = map[string]string{
+		ws.Annotations = map[string]string{
 			tfv1alphav1.ManualApplyAnnotation: "true",
 		}
-		assert.NoError(t, k.Resources().Update(ctx, resource))
+		assert.NoError(t, k.Resources().Update(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(resource, func(object k8s.Object) bool {
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			_, ok := object.GetAnnotations()[tfv1alphav1.ManualApplyAnnotation]
 			return !ok
 		}))
 		assert.NoError(t, err)
 
 		events := &v1.EventList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(resource.Name)), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		var reasons []string
 		for _, e := range events.Items {
@@ -190,7 +163,7 @@ resource "random_pet" "name" {
 		}
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(resource)), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
@@ -225,7 +198,7 @@ resource "random_pet" "name" {
 		})
 		assert.NoError(t, err)
 
-		ws := newWs("test-resource-generic-token")
+		ws := newWs("test-resource-generic-token", modHost.ModuleSource("my-module"))
 		ws.Spec.PreventDestroy = false
 		ws.Spec.AutoApply = false
 		ws.Spec.Authentication = &tfv1alphav1.AuthenticationSpec{
@@ -254,7 +227,7 @@ resource "random_pet" "name" {
 
 	t.Run("cleanup plans on deletion", func(t *testing.T) {
 		t.Parallel()
-		ws := newWs("test-resource-cleanup")
+		ws := newWs("test-resource-cleanup", modHost.ModuleSource("my-module"))
 		ws.Spec.PreventDestroy = false
 		ws.Spec.AutoApply = false
 
@@ -279,7 +252,7 @@ resource "random_pet" "name" {
 
 	t.Run("cleanup plans on passed history limit", func(t *testing.T) {
 		t.Parallel()
-		ws := newWs("test-resource-history-limit-1")
+		ws := newWs("test-resource-history-limit-1", modHost.ModuleSource("my-module"))
 		ws.Spec.AutoApply = false
 		ws.Spec.PreventDestroy = false
 		ws.Spec.PlanHistoryLimit = 1
@@ -309,7 +282,7 @@ func plansForWs(ws *tfv1alphav1.Workspace) resources.ListOption {
 	return resources.WithLabelSelector(fmt.Sprintf("%s=%s", tfv1alphav1.WorkspacePlanLabel, ws.Name))
 }
 
-func newWs(name string) *tfv1alphav1.Workspace {
+func newWs(name, moduleSource string) *tfv1alphav1.Workspace {
 	return &tfv1alphav1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -335,7 +308,7 @@ func newWs(name string) *tfv1alphav1.Workspace {
 				},
 			},
 			Module: &tfv1alphav1.ModuleSpec{
-				Source: "my-module",
+				Source: moduleSource,
 				Name:   "my-module",
 			},
 		},
