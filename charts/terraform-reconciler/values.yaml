@@ -1,6 +1,8 @@
 appName: "terraform-reconciler"
 namespace: "terraform-reconciler"
 
+openshift: false
+
 image:
   repository: ghcr.io/lego/kube-tf-reconciler/kube-tf-reconciler
   tag: sha-5a43a54
