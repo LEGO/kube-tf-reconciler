@@ -705,6 +705,7 @@ func (r *WorkspaceReconciler) setupAWSAuthentication(ctx context.Context, ws *tf
 
 	tokenRequest := &authv1.TokenRequest{
 		Spec: authv1.TokenRequestSpec{
+			Audiences:         []string{"sts.amazonaws.com"},
 			ExpirationSeconds: func(i int64) *int64 { return &i }(600),
 		},
 	}
