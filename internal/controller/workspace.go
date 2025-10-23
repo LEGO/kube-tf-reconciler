@@ -479,7 +479,7 @@ func (r *WorkspaceReconciler) executeTerraformPlan(ctx context.Context, tf *tfex
 	var changed bool
 	var err error
 
-	r.Tf.WithOutputStream(ctx, tf, func() {
+	runner.WithOutputStream(ctx, tf, func() {
 		changed, err = tf.Plan(ctx, tfexec.Destroy(destroy), tfexec.Out("plan.out"))
 	}, cb)
 
@@ -499,7 +499,7 @@ func (r *WorkspaceReconciler) executeTerraformPlan(ctx context.Context, tf *tfex
 func (r *WorkspaceReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.Terraform, destroy bool, cb func(stdout, stderr string)) (string, error) {
 	var stdout, stderr string
 	var err error
-	r.Tf.WithOutputStream(ctx, tf, func() {
+	runner.WithOutputStream(ctx, tf, func() {
 		if destroy {
 			err = tf.Destroy(ctx)
 		} else {

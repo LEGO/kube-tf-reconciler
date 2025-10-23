@@ -1,8 +1,12 @@
 package runner
 
 import (
+	"context"
+	"github.com/hashicorp/terraform-exec/tfexec"
+	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
@@ -27,4 +31,24 @@ func TestChecksum(t *testing.T) {
 	check, err := e.CalculateChecksum(ws)
 	assert.NoError(t, err)
 	assert.Equal(t, "c147efcfc2d7ea666a9e4f5187b115c90903f0fc896a56df9a6ef5d8f3fc9f31", check)
+}
+
+func TestWithOutputStream(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	e := New(dir)
+	terraformBinary, err := e.getTerraformBinary(ctx, "1.11.2")
+	require.NoError(t, err)
+	tf, err := tfexec.NewTerraform(dir, terraformBinary)
+	require.NoError(t, err)
+	var body string
+	WithOutputStream(ctx, tf, func() {
+		_, _, err := tf.Version(ctx, false)
+		require.NoError(t, err)
+		_, _, err = tf.Version(ctx, false)
+		require.NoError(t, err)
+	}, func(stdout, stderr string) {
+		assert.NotEqual(t, body, stdout)
+		assert.Truef(t, strings.HasPrefix(stdout, body), "received a different stdout than what we've had so far")
+	})
 }

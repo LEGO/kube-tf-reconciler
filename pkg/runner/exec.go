@@ -72,59 +72,6 @@ func New(rootDir string) *Exec {
 	}
 }
 
-func (e *Exec) WithOutputStream(ctx context.Context, tf *tfexec.Terraform, action func(), cb func(stdout, stderr string)) {
-	outBody := strings.Builder{}
-	errBody := strings.Builder{}
-	cbMu := sync.Mutex{}
-	ro, wo := io.Pipe()
-	re, we := io.Pipe()
-
-	tf.SetStdout(wo)
-	tf.SetStderr(we)
-
-	wg := sync.WaitGroup{}
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 1024)
-		for {
-			read, err := ro.Read(buf)
-			cbMu.Lock()
-			outBody.Write(buf[:read])
-			cb(outBody.String(), errBody.String())
-			cbMu.Unlock()
-			if err != nil {
-				return
-			}
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 1024)
-		for {
-			read, err := re.Read(buf)
-			cbMu.Lock()
-			errBody.Write(buf[:read])
-			cb(outBody.String(), errBody.String())
-			cbMu.Unlock()
-			if err != nil {
-				return
-			}
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		action()
-		tf.SetStderr(nil)
-		tf.SetStdout(nil)
-		_ = ro.Close()
-		_ = wo.Close()
-		_ = re.Close()
-		_ = we.Close()
-	}()
-	wg.Wait()
-}
-
 func (e *Exec) SetupWorkspace(ws *tfreconcilev1alpha1.Workspace) (string, error) {
 	fullPath := filepath.Join(e.WorkspacesDir, ws.Namespace, ws.Name)
 	err := os.MkdirAll(fullPath, 0755)
@@ -155,7 +102,7 @@ func (e *Exec) TerraformInit(ctx context.Context, tf *tfexec.Terraform, cb func(
 	e.providerInitMutex.Lock()
 	defer e.providerInitMutex.Unlock()
 	var err error
-	e.WithOutputStream(ctx, tf, func() {
+	WithOutputStream(ctx, tf, func() {
 		err = tf.Init(ctx, opts...)
 	}, func(stdout, stderr string) {
 		cb(stdout, stderr)
@@ -271,4 +218,57 @@ func (e *Exec) CalculateChecksum(ws *tfreconcilev1alpha1.Workspace) (string, err
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func WithOutputStream(ctx context.Context, tf *tfexec.Terraform, action func(), cb func(stdout, stderr string)) {
+	outBody := strings.Builder{}
+	errBody := strings.Builder{}
+	cbMu := sync.Mutex{}
+	ro, wo := io.Pipe()
+	re, we := io.Pipe()
+
+	tf.SetStdout(wo)
+	tf.SetStderr(we)
+
+	wg := sync.WaitGroup{}
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1024)
+		for {
+			read, err := ro.Read(buf)
+			cbMu.Lock()
+			outBody.Write(buf[:read])
+			cb(outBody.String(), errBody.String())
+			cbMu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1024)
+		for {
+			read, err := re.Read(buf)
+			cbMu.Lock()
+			errBody.Write(buf[:read])
+			cb(outBody.String(), errBody.String())
+			cbMu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		action()
+		tf.SetStderr(nil)
+		tf.SetStdout(nil)
+		_ = ro.Close()
+		_ = wo.Close()
+		_ = re.Close()
+		_ = we.Close()
+	}()
+	wg.Wait()
 }
