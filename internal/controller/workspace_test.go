@@ -109,6 +109,7 @@ resource "random_pet" "name" {
 		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.NotEmpty(t, ws.Status.LastPlanOutput)
+		assert.NotEmpty(t, ws.Status.InitOutput)
 
 		events := &v1.EventList{}
 		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))

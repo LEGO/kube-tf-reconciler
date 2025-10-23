@@ -198,6 +198,10 @@ type WorkspaceStatus struct {
 	// +kubebuilder:validation:Optional
 	ValidRender bool `json:"validRender"`
 
+	// InitOutput is the result of initialising dependencies in the workspace
+	// +kubebuilder:validation:Optional
+	InitOutput string `json:"initOutput"`
+
 	// CurrentContentHash is a hash of the .terraform directory content, used to detect
 	// changes in modules that are not evident in the workspace spec (e.g. git modules)
 	// +kubebuilder:validation:Optional
@@ -231,7 +235,7 @@ type WorkspaceStatus struct {
 	LastExecutionTime *metav1.Time `json:"lastExecutionTime,omitempty"`
 	// LastPlanOutput contains the raw terraform plan output
 	// +kubebuilder:validation:Optional
-	LastPlanOutput string `json:"lastPlanOutput,omitempty"`
+	LastPlanOutput string `json:"lastPlanOutput"`
 	// LastApplyOutput contains the raw terraform apply output
 	// +kubebuilder:validation:Optional
 	LastApplyOutput string `json:"lastApplyOutput,omitempty"`
