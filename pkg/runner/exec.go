@@ -92,10 +92,10 @@ func (e *Exec) WithOutputStream(ctx context.Context, tf *tfexec.Terraform, actio
 			cbMu.Lock()
 			outBody.Write(buf[:read])
 			cb(outBody.String(), errBody.String())
+			cbMu.Unlock()
 			if err != nil {
 				return
 			}
-			cbMu.Unlock()
 		}
 	}()
 	go func() {
@@ -106,10 +106,10 @@ func (e *Exec) WithOutputStream(ctx context.Context, tf *tfexec.Terraform, actio
 			cbMu.Lock()
 			errBody.Write(buf[:read])
 			cb(outBody.String(), errBody.String())
+			cbMu.Unlock()
 			if err != nil {
 				return
 			}
-			cbMu.Unlock()
 		}
 	}()
 	go func() {

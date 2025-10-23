@@ -229,10 +229,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 
 	_ = r.updateWorkspaceStatus(ctx, ws, TFPhasePlanning, "Starting terraform plan", nil)
 
-	var err error
-	var changed bool
-	var planOutput string
-	changed, planOutput, err = r.executeTerraformPlan(ctx, tf, false, func(stdout, stderr string) {
+	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, false, func(stdout, stderr string) {
 		old := ws.DeepCopy()
 		ws.Status.LastPlanOutput, _ = constructOutput(stdout, stderr, nil)
 
@@ -315,9 +312,7 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 	if ws.Status.HasChanges {
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseApplying, "Applying terraform changes", nil)
 
-		var err error
-		var applyOutput string
-		applyOutput, err = r.executeTerraformApply(ctx, tf, false, func(stdout, stderr string) {
+		applyOutput, err := r.executeTerraformApply(ctx, tf, false, func(stdout, stderr string) {
 			old := ws.DeepCopy()
 			ws.Status.LastApplyOutput, _ = constructOutput(stdout, stderr, nil)
 
