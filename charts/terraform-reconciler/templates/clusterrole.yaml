@@ -12,6 +12,10 @@ rules:
     verbs: ["get", "update", "patch"]
 
   - apiGroups: ["tf-reconcile.lego.com"]
+    resources: ["workspaces/finalizers", "plans/finalizers"]
+    verbs: ["update", "patch"]
+
+  - apiGroups: ["tf-reconcile.lego.com"]
     resources: ["plans"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
