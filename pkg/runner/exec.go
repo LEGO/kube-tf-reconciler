@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +29,10 @@ type Exec struct {
 	terraformInstalledVersions map[string]string
 	terraformInstallMutex      sync.RWMutex
 	providerInitMutex          sync.Mutex
+
+	outputStreamReader    io.ReadCloser
+	outputStreamWriter    io.WriteCloser
+	outputStreamWaitGroup sync.WaitGroup
 }
 
 func New(rootDir string) *Exec {
@@ -93,10 +98,16 @@ func (e *Exec) SetupTerraformRC(workspacePath string, terraformRCContent string)
 	return terraformRCPath, nil
 }
 
-func (e *Exec) TerraformInit(ctx context.Context, tf *tfexec.Terraform, opts ...tfexec.InitOption) error {
+func (e *Exec) TerraformInit(ctx context.Context, tf *tfexec.Terraform, cb func(stdout, stderr string), opts ...tfexec.InitOption) error {
 	e.providerInitMutex.Lock()
 	defer e.providerInitMutex.Unlock()
-	err := tf.Init(ctx, opts...)
+	var err error
+	WithOutputStream(ctx, tf, func() {
+		err = tf.Init(ctx, opts...)
+	}, func(stdout, stderr string) {
+		cb(stdout, stderr)
+	})
+
 	return err
 }
 
@@ -207,4 +218,57 @@ func (e *Exec) CalculateChecksum(ws *tfreconcilev1alpha1.Workspace) (string, err
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func WithOutputStream(ctx context.Context, tf *tfexec.Terraform, action func(), cb func(stdout, stderr string)) {
+	outBody := strings.Builder{}
+	errBody := strings.Builder{}
+	cbMu := sync.Mutex{}
+	ro, wo := io.Pipe()
+	re, we := io.Pipe()
+
+	tf.SetStdout(wo)
+	tf.SetStderr(we)
+
+	wg := sync.WaitGroup{}
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1024)
+		for {
+			read, err := ro.Read(buf)
+			cbMu.Lock()
+			outBody.Write(buf[:read])
+			cb(outBody.String(), errBody.String())
+			cbMu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1024)
+		for {
+			read, err := re.Read(buf)
+			cbMu.Lock()
+			errBody.Write(buf[:read])
+			cb(outBody.String(), errBody.String())
+			cbMu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		action()
+		tf.SetStderr(nil)
+		tf.SetStdout(nil)
+		_ = ro.Close()
+		_ = wo.Close()
+		_ = re.Close()
+		_ = we.Close()
+	}()
+	wg.Wait()
 }

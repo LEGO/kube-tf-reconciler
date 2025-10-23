@@ -290,6 +290,10 @@ spec:
                 description: HasChanges indicates whether the last plan contained
                   changes
                 type: boolean
+              initOutput:
+                description: InitOutput is the result of initialising dependencies
+                  in the workspace
+                type: string
               lastApplyOutput:
                 description: LastApplyOutput contains the raw terraform apply output
                 type: string

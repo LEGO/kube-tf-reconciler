@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -132,7 +131,16 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	log.V(DebugLevel).Info("refresh dependencies starting")
 	defer log.V(DebugLevel).Info("refresh dependencies completed")
 
-	err := r.Tf.TerraformInit(ctx, tf)
+	err := r.Tf.TerraformInit(ctx, tf, func(stdout, stderr string) {
+		old := ws.DeepCopy()
+		ws.Status.InitOutput, _ = constructOutput(stdout, stderr, nil)
+
+		err := r.Status().Patch(ctx, ws, client.MergeFrom(old))
+		if err != nil {
+			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace init output: %v", err), nil)
+			return
+		}
+	})
 	if err != nil {
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to init terraform: %v", err), nil)
 		return ctrl.Result{}, err, true
@@ -221,27 +229,38 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 
 	_ = r.updateWorkspaceStatus(ctx, ws, TFPhasePlanning, "Starting terraform plan", nil)
 
-	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, false)
+	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, false, func(stdout, stderr string) {
+		old := ws.DeepCopy()
+		ws.Status.LastPlanOutput, _ = constructOutput(stdout, stderr, nil)
+
+		err := r.Status().Patch(ctx, ws, client.MergeFrom(old))
+		if err != nil {
+			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace plan output: %v", err), nil)
+			return
+		}
+	})
+
 	if err != nil {
 		log.Error(err, "failed to execute terraform plan", "workspace", ws.Name)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to execute terraform plan: %v", err), nil)
 		return ctrl.Result{}, err, true
 	}
+	ws.Status.LastPlanOutput = ""
 
 	if !changed {
 		log.Info("plan has no changes, marking as completed", "workspace", ws.Name)
 		now := metav1.Now()
 		err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan completed - no changes needed", func(s *tfv1alphav1.WorkspaceStatus) {
 			s.HasChanges = false
-			s.LastPlanOutput = planOutput
 			s.LastExecutionTime = &now
+			s.LastPlanOutput = ""
 		})
 		if err != nil {
 			return ctrl.Result{}, err, true
 		}
 	}
 
-	plan, err := r.createPlanRecord(ctx, ws, changed, planOutput, "", false, false)
+	plan, err := r.createPlanRecord(ctx, ws, changed, planOutput, "", tfv1alphav1.PlanPhasePlanned, false)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to create plan record: %w", err), true
 
@@ -251,7 +270,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		s.HasChanges = changed
 		s.NewPlanNeeded = false
 		s.NewApplyNeeded = true
-		s.LastPlanOutput = planOutput
+		s.LastPlanOutput = ""
 		s.CurrentPlan = &tfv1alphav1.PlanReference{
 			Name:      plan.Name,
 			Namespace: plan.Namespace,
@@ -292,7 +311,17 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 
 	if ws.Status.HasChanges {
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseApplying, "Applying terraform changes", nil)
-		applyOutput, err := r.executeTerraformApply(ctx, tf, false)
+
+		applyOutput, err := r.executeTerraformApply(ctx, tf, false, func(stdout, stderr string) {
+			old := ws.DeepCopy()
+			ws.Status.LastApplyOutput, _ = constructOutput(stdout, stderr, nil)
+
+			err := r.Status().Patch(ctx, ws, client.MergeFrom(old))
+			if err != nil {
+				_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace plan output: %v", err), nil)
+				return
+			}
+		})
 		if err != nil {
 			log.Error(err, "failed to apply terraform", "workspace", ws.Name)
 			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to apply terraform: %v", err), func(s *tfv1alphav1.WorkspaceStatus) {
@@ -302,7 +331,7 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 			return ctrl.Result{}, err, true
 		}
 
-		_, err = r.createPlanRecord(ctx, ws, ws.Status.HasChanges, ws.Status.LastPlanOutput, applyOutput, true, false)
+		_, err = r.createPlanRecord(ctx, ws, ws.Status.HasChanges, ws.Status.LastPlanOutput, applyOutput, tfv1alphav1.PlanPhaseApplied, false)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to create plan record after failed apply: %w", err), true
 		}
@@ -446,11 +475,13 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *WorkspaceReconciler) executeTerraformPlan(ctx context.Context, tf *tfexec.Terraform, destroy bool) (bool, string, error) {
+func (r *WorkspaceReconciler) executeTerraformPlan(ctx context.Context, tf *tfexec.Terraform, destroy bool, cb func(stdout, stderr string)) (bool, string, error) {
 	var changed bool
 	var err error
 
-	changed, err = tf.Plan(ctx, tfexec.Destroy(destroy), tfexec.Out("plan.out"))
+	runner.WithOutputStream(ctx, tf, func() {
+		changed, err = tf.Plan(ctx, tfexec.Destroy(destroy), tfexec.Out("plan.out"))
+	}, cb)
 
 	if err != nil {
 		return false, "", fmt.Errorf("failed to plan terraform: %w", err)
@@ -465,34 +496,37 @@ func (r *WorkspaceReconciler) executeTerraformPlan(ctx context.Context, tf *tfex
 }
 
 // executeTerraformApply executes terraform apply or destroy command
-func (r *WorkspaceReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.Terraform, destroy bool) (string, error) {
-	var stdout, stderr bytes.Buffer
-	tf.SetStdout(&stdout)
-	tf.SetStderr(&stderr)
-
+func (r *WorkspaceReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.Terraform, destroy bool, cb func(stdout, stderr string)) (string, error) {
+	var stdout, stderr string
 	var err error
-	if destroy {
-		err = tf.Destroy(ctx)
-	} else {
-		err = tf.Apply(ctx)
-	}
+	runner.WithOutputStream(ctx, tf, func() {
+		if destroy {
+			err = tf.Destroy(ctx)
+		} else {
+			err = tf.Apply(ctx)
+		}
+	}, func(so, se string) {
+		stdout = so
+		stderr = se
+		cb(stdout, stderr)
+	})
 
 	return constructOutput(stdout, stderr, err)
 }
 
-func constructOutput(stdout, stderr bytes.Buffer, err error) (string, error) {
+func constructOutput(stdout, stderr string, err error) (string, error) {
 	var output string
-	if stdout.Len() > 0 {
+	if len(stdout) > 0 {
 		output += "=== TERRAFORM OUTPUT ===\n"
-		output += stdout.String()
+		output += stdout
 	}
 
-	if stderr.Len() > 0 {
+	if len(stderr) > 0 {
 		if output != "" {
 			output += "\n"
 		}
 		output += "=== TERRAFORM DIAGNOSTICS ===\n"
-		output += stderr.String()
+		output += stderr
 	}
 
 	if err != nil && output != "" {
@@ -528,19 +562,25 @@ func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfv
 }
 
 // createPlanRecord creates a Plan CRD as an audit record after terraform execution
-func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alphav1.Workspace, hasChanges bool, planOutput, applyOutput string, wasApplied bool, destroy bool) (*tfv1alphav1.Plan, error) {
+func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alphav1.Workspace, hasChanges bool, planOutput, applyOutput string, phase tfv1alphav1.PlanPhase, destroy bool) (*tfv1alphav1.Plan, error) {
 	planName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
 
-	phase := tfv1alphav1.PlanPhasePlanned
-	message := "Plan completed"
-	if wasApplied {
-		phase = tfv1alphav1.PlanPhaseApplied
-		message = "Plan completed and applied"
-	} else if applyOutput != "" {
-		// If there's apply output but wasApplied is false, it means apply failed
-		phase = tfv1alphav1.PlanPhaseErrored
+	var message string
+	switch phase {
+	case tfv1alphav1.PlanPhasePlanned:
+		message = "Plan completed"
+	case tfv1alphav1.PlanPhaseErrored:
+		// We only create a plan object if a plan was successfully run, so assume apply has failed
 		message = "Plan completed but apply failed"
+	case tfv1alphav1.PlanPhasePlanning:
+		message = "Plan in progress"
+	case tfv1alphav1.PlanPhaseApplied:
+		message = "Plan completed and applied"
+	case tfv1alphav1.PlanPhaseCancelled:
+		// We only create a plan object if a plan was successfully run, so assume apply was cancelled
+		message = "Plan completed but apply cancelled"
 	}
+
 	now := metav1.Now()
 	plan := &tfv1alphav1.Plan{
 		ObjectMeta: metav1.ObjectMeta{
