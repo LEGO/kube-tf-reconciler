@@ -115,8 +115,16 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfv1alpha
 	}
 
 	old := ws.DeepCopy()
-	ws.Status.CurrentRender = rendering
-	err = r.Status().Patch(ctx, ws, client.MergeFrom(old))
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+
+		ws.Status.CurrentRender = rendering
+
+		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	})
+
 	if err != nil {
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace status after rendering: %v", err), nil)
 		return ctrl.Result{}, err, true
@@ -133,9 +141,15 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 
 	err := r.Tf.TerraformInit(ctx, tf, func(stdout, stderr string) {
 		old := ws.DeepCopy()
-		ws.Status.InitOutput, _ = constructOutput(stdout, stderr, nil)
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+				return err
+			}
 
-		err := r.Status().Patch(ctx, ws, client.MergeFrom(old))
+			ws.Status.InitOutput, _ = constructOutput(stdout, stderr, nil)
+			return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+		})
+
 		if err != nil {
 			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace init output: %v", err), nil)
 			return
@@ -156,8 +170,16 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	r.Recorder.Eventf(ws, v1.EventTypeNormal, TFValidateEventReason, "Terraform validation completed, valid: %t", valResult.Valid)
 
 	old := ws.DeepCopy()
-	ws.Status.ValidRender = valResult.Valid
-	err = r.Status().Patch(ctx, ws, client.MergeFrom(old))
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+
+		ws.Status.ValidRender = valResult.Valid
+
+		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	})
+
 	if err != nil {
 		return ctrl.Result{}, err, true
 	}
@@ -188,9 +210,16 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	if ws.ManualApplyRequested() && hasPlan {
 		log.V(DebugLevel).Info("manual apply requested, marking apply needed")
 		old = ws.DeepCopy()
-		ws.Status.NewApplyNeeded = true
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+				return err
+			}
 
-		err = r.Status().Patch(ctx, ws, client.MergeFrom(old))
+			ws.Status.NewApplyNeeded = true
+
+			return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+		})
+
 		if err != nil {
 			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace status for manual apply: %v", err), nil)
 			return ctrl.Result{}, err, true
@@ -205,10 +234,16 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	}
 
 	old = ws.DeepCopy()
-	ws.Status.CurrentContentHash = sum
-	ws.Status.NewPlanNeeded = true
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
 
-	err = r.Status().Patch(ctx, ws, client.MergeFrom(old))
+		ws.Status.CurrentContentHash = sum
+		ws.Status.NewPlanNeeded = true
+
+		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	})
 	if err != nil {
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update dependency hash label: %v", err), nil)
 		return ctrl.Result{}, err, true
@@ -231,9 +266,17 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 
 	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, false, func(stdout, stderr string) {
 		old := ws.DeepCopy()
-		ws.Status.LastPlanOutput, _ = constructOutput(stdout, stderr, nil)
 
-		err := r.Status().Patch(ctx, ws, client.MergeFrom(old))
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+				return err
+			}
+
+			ws.Status.LastPlanOutput, _ = constructOutput(stdout, stderr, nil)
+
+			return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+		})
+
 		if err != nil {
 			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace plan output: %v", err), nil)
 			return
@@ -263,13 +306,12 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 	plan, err := r.createPlanRecord(ctx, ws, changed, planOutput, "", tfv1alphav1.PlanPhasePlanned, false)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to create plan record: %w", err), true
-
 	}
 
 	err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan completed", func(s *tfv1alphav1.WorkspaceStatus) {
 		s.HasChanges = changed
 		s.NewPlanNeeded = false
-		s.NewApplyNeeded = true
+		s.NewApplyNeeded = changed
 		s.LastPlanOutput = ""
 		s.CurrentPlan = &tfv1alphav1.PlanReference{
 			Name:      plan.Name,
@@ -314,9 +356,17 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 
 		applyOutput, err := r.executeTerraformApply(ctx, tf, false, func(stdout, stderr string) {
 			old := ws.DeepCopy()
-			ws.Status.LastApplyOutput, _ = constructOutput(stdout, stderr, nil)
 
-			err := r.Status().Patch(ctx, ws, client.MergeFrom(old))
+			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+					return err
+				}
+
+				ws.Status.LastApplyOutput, _ = constructOutput(stdout, stderr, nil)
+
+				return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+			})
+
 			if err != nil {
 				_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace plan output: %v", err), nil)
 				return
@@ -350,8 +400,15 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 	}
 
 	old := ws.DeepCopy()
-	ws.Status.NewApplyNeeded = false
-	err := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+
+		ws.Status.NewApplyNeeded = false
+
+		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	})
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status after apply: %w", err), true
 	}
@@ -452,9 +509,16 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 	}
 
 	old = ws.DeepCopy()
-	ws.Status.ObservedGeneration = ws.Generation
-	ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(5 * time.Minute))
-	err = r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+
+		ws.Status.ObservedGeneration = ws.Generation
+		ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(5 * time.Minute))
+
+		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	})
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to patch workspace status during cleanup: %w", err), true
 	}
