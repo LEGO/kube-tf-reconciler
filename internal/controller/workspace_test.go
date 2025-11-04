@@ -68,15 +68,15 @@ func TestWorkspaceController(t *testing.T) {
 	assert.NoError(t, err)
 
 	localModule := `variable "pet_name_length" {
-  default = 2
-  type    = number
-}
+	default = 2
+	type    = number
+	}
 
-resource "random_pet" "name" {
-  length    = var.pet_name_length
-  separator = "-"
-}
-`
+	resource "random_pet" "name" {
+	length    = var.pet_name_length
+	separator = "-"
+	}
+	`
 	modHost.AddFileToModule("my-module", "main.tf", localModule)
 
 	rootDir := t.TempDir() // testutils.TestDataFolder() // Enable to better introspection into test data
@@ -276,6 +276,158 @@ resource "random_pet" "name" {
 		assert.Len(t, plans.Items, 1)
 		assert.Equal(t, 2, int(ws.Generation))
 		assert.Equal(t, fmt.Sprintf("%s-2", ws.Name), plans.Items[0].Name)
+	})
+
+	t.Run("error status and events are preserved", func(t *testing.T) {
+		t.Parallel()
+		ws := newWs("test-error-preservation", "http://invalid-source-that-does-not-exist")
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = false
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			ws := object.(*tfv1alphav1.Workspace)
+			return ws.Status.TerraformPhase == TFPhaseErrored
+		}), wait.WithTimeout(time.Second*30))
+		assert.NoError(t, err)
+
+		firstErrorMessage := ws.Status.TerraformMessage
+		firstErrorTime := ws.Status.LastErrorTime
+		assert.NotEmpty(t, firstErrorMessage)
+		assert.NotNil(t, firstErrorTime)
+		assert.Equal(t, firstErrorMessage, ws.Status.LastErrorMessage)
+
+		time.Sleep(time.Second * 2)
+
+		assert.NoError(t, k.Resources().Get(ctx, ws.Name, ws.Namespace, ws))
+
+		assert.NotNil(t, ws.Status.LastErrorTime)
+		assert.NotEmpty(t, ws.Status.LastErrorMessage)
+		assert.Equal(t, firstErrorTime.Unix(), ws.Status.LastErrorTime.Unix())
+		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to")
+
+		events := &v1.EventList{}
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 0, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		var errorEvents []v1.Event
+		for _, e := range events.Items {
+			if e.Type == v1.EventTypeWarning && e.Reason == TFErrEventReason {
+				errorEvents = append(errorEvents, e)
+			}
+		}
+		assert.NotEmpty(t, errorEvents, "Expected at least one error event")
+		assert.Contains(t, errorEvents[0].Message, "Failed to")
+	})
+
+	t.Run("validation error creates event and preserves error", func(t *testing.T) {
+		t.Parallel()
+
+		invalidModule := `resource "invalid_resource" "test" {
+		# Missing required argument
+		invalid_syntax here
+		}`
+		modHost.AddFileToModule("invalid-module", "main.tf", invalidModule)
+
+		ws := newWs("test-validation-error", modHost.ModuleSource("invalid-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = false
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			ws := object.(*tfv1alphav1.Workspace)
+			return ws.Status.TerraformPhase == TFPhaseErrored && !ws.Status.ValidRender
+		}), wait.WithTimeout(time.Second*30))
+		assert.NoError(t, err)
+
+		events := &v1.EventList{}
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 0, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		var validationEvents []v1.Event
+		for _, e := range events.Items {
+			if e.Reason == TFValidateEventReason || e.Reason == TFErrEventReason {
+				validationEvents = append(validationEvents, e)
+			}
+		}
+		assert.NotEmpty(t, validationEvents, "Expected validation error events")
+
+		// Verify error status fields
+		assert.NotNil(t, ws.Status.LastErrorTime)
+		assert.NotEmpty(t, ws.Status.LastErrorMessage)
+		assert.Contains(t, ws.Status.LastErrorMessage, "validation")
+	})
+
+	t.Run("successful reconciliation after error clears current message but preserves last error", func(t *testing.T) {
+		t.Parallel()
+
+		validModule := `variable "pet_length" {
+		default = 2
+		type    = number
+		}
+
+		resource "random_pet" "test" {
+		length = var.pet_length
+		}`
+		modHost.AddFileToModule("fix-module", "main.tf", validModule)
+
+		ws := newWs("test-error-recovery", modHost.ModuleSource("fix-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			ws := object.(*tfv1alphav1.Workspace)
+			return ws.Status.TerraformPhase == TFPhaseCompleted
+		}), wait.WithTimeout(time.Second*30))
+		assert.NoError(t, err)
+
+		invalidModule := `variable "pet_length" {
+		default = 2
+		type    = number
+		}
+
+		resource "random_pet" "test" {
+		# Missing required length argument
+		}`
+		modHost.AddFileToModule("fix-module", "main.tf", invalidModule)
+
+		ws.Spec.Module.Inputs = testutils.Json(map[string]interface{}{
+			"pet_length": 3,
+		})
+		assert.NoError(t, k.Resources().Update(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			ws := object.(*tfv1alphav1.Workspace)
+			return ws.Status.TerraformPhase == TFPhaseErrored
+		}), wait.WithTimeout(time.Second*30))
+		assert.NoError(t, err)
+
+		lastErrorMessage := ws.Status.LastErrorMessage
+		lastErrorTime := ws.Status.LastErrorTime
+		assert.NotEmpty(t, lastErrorMessage)
+		assert.NotNil(t, lastErrorTime)
+
+		modHost.AddFileToModule("fix-module", "main.tf", validModule)
+
+		ws.Spec.Module.Inputs = testutils.Json(map[string]interface{}{
+			"pet_length": 4,
+		})
+		assert.NoError(t, k.Resources().Update(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			ws := object.(*tfv1alphav1.Workspace)
+			return ws.Status.TerraformPhase == TFPhaseCompleted && ws.Status.ObservedGeneration == ws.Generation
+		}), wait.WithTimeout(time.Second*45))
+		assert.NoError(t, err)
+
+		assert.NotNil(t, ws.Status.LastErrorTime)
+		assert.NotEmpty(t, ws.Status.LastErrorMessage)
+		assert.Equal(t, lastErrorTime.Unix(), ws.Status.LastErrorTime.Unix())
+		assert.Equal(t, lastErrorMessage, ws.Status.LastErrorMessage)
+
+		assert.NotEqual(t, ws.Status.TerraformMessage, ws.Status.LastErrorMessage)
+		assert.NotContains(t, ws.Status.TerraformMessage, "Failed to")
 	})
 }
 

@@ -110,6 +110,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool) {
 	rendering, err := r.Renderer.Render(ws)
 	if err != nil {
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to render workspace: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to render workspace: %v", err), nil)
 		return ctrl.Result{}, err, true
 	}
@@ -142,6 +143,7 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 		}
 	})
 	if err != nil {
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to init terraform: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to init terraform: %v", err), nil)
 		return ctrl.Result{}, err, true
 	}
@@ -149,6 +151,7 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	valResult, err := tf.Validate(ctx)
 	if err != nil {
 		log.Error(err, "failed to validate terraform", "workspace", ws.Name)
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to validate terraform: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to validate terraform: %v", err), nil)
 		return ctrl.Result{}, err, true
 	}
@@ -165,12 +168,14 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	if !valResult.Valid {
 		log.Error(err, "Terraform validation failed", "workspace", ws.Name)
 		diagnosticsMsg := r.formatValidationDiagnostics(valResult.Diagnostics)
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFValidateEventReason, "Terraform validation failed: %s", diagnosticsMsg)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, diagnosticsMsg, nil)
 		return ctrl.Result{}, fmt.Errorf("terraform validation failed: %s", diagnosticsMsg), true
 	}
 
 	sum, err := r.Tf.CalculateChecksum(ws)
 	if err != nil {
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to calculate dependency hash: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to calculate dependency hash: %v", err), nil)
 		return ctrl.Result{}, err, true
 	}
@@ -242,6 +247,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 
 	if err != nil {
 		log.Error(err, "failed to execute terraform plan", "workspace", ws.Name)
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFPlanEventReason, "Failed to execute terraform plan: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to execute terraform plan: %v", err), nil)
 		return ctrl.Result{}, err, true
 	}
@@ -262,6 +268,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 
 	plan, err := r.createPlanRecord(ctx, ws, changed, planOutput, "", tfv1alphav1.PlanPhasePlanned, false)
 	if err != nil {
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to create plan record: %v", err)
 		return ctrl.Result{}, fmt.Errorf("failed to create plan record: %w", err), true
 
 	}
@@ -277,6 +284,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		}
 	})
 	if err != nil {
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to update workspace status with current plan: %v", err)
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status with current plan: %w", err), true
 	}
 
@@ -324,6 +332,7 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 		})
 		if err != nil {
 			log.Error(err, "failed to apply terraform", "workspace", ws.Name)
+			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFApplyEventReason, "Failed to apply terraform: %v", err)
 			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to apply terraform: %v", err), func(s *tfv1alphav1.WorkspaceStatus) {
 				s.LastApplyOutput = applyOutput
 			})
@@ -333,6 +342,7 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 
 		_, err = r.createPlanRecord(ctx, ws, ws.Status.HasChanges, ws.Status.LastPlanOutput, applyOutput, tfv1alphav1.PlanPhaseApplied, false)
 		if err != nil {
+			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to create plan record after apply: %v", err)
 			return ctrl.Result{}, fmt.Errorf("failed to create plan record after failed apply: %w", err), true
 		}
 
@@ -366,12 +376,14 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 
 	envs, err := r.getEnvsForExecution(ctx, ws)
 	if err != nil {
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to get envs for execution: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to get envs for execution: %v", err), nil)
 		return ctrl.Result{}, err, true, nil
 	}
 
 	tf, terraformRCPath, err := r.Tf.GetTerraformForWorkspace(ctx, ws)
 	if err != nil {
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to get terraform executable: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to get terraform executable: %v", err), nil)
 		return ctrl.Result{}, err, true, nil
 	}
@@ -387,6 +399,7 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 
 	err = tf.SetEnv(envs)
 	if err != nil {
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to set terraform env: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to set terraform env: %v", err), nil)
 		return ctrl.Result{}, err, true, nil
 	}
@@ -414,6 +427,7 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 	if !ws.Spec.PreventDestroy {
 		err := tf.Destroy(ctx)
 		if err != nil {
+			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFDestroyEventReason, "Failed to destroy terraform resources: %v", err)
 			return ctrl.Result{}, fmt.Errorf("failed to destroy terraform resources: %w", err), true
 		}
 	}
@@ -547,6 +561,12 @@ func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfv
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
 			return err
+		}
+
+		// Preserve last error information when entering error state
+		if phase == TFPhaseErrored && ws.Status.TerraformPhase != TFPhaseErrored {
+			ws.Status.LastErrorTime = &metav1.Time{Time: time.Now()}
+			ws.Status.LastErrorMessage = message
 		}
 
 		ws.Status.TerraformPhase = phase

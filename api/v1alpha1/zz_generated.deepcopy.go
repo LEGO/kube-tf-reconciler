@@ -449,6 +449,10 @@ func (in *WorkspaceStatus) DeepCopyInto(out *WorkspaceStatus) {
 		**out = **in
 	}
 	in.NextRefreshTimestamp.DeepCopyInto(&out.NextRefreshTimestamp)
+	if in.LastErrorTime != nil {
+		in, out := &in.LastErrorTime, &out.LastErrorTime
+		*out = (*in).DeepCopy()
+	}
 	if in.LastExecutionTime != nil {
 		in, out := &in.LastExecutionTime, &out.LastExecutionTime
 		*out = (*in).DeepCopy()

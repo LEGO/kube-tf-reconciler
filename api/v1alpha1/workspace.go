@@ -227,6 +227,12 @@ type WorkspaceStatus struct {
 	// TerraformMessage provides details about the current terraform operation
 	// +kubebuilder:validation:Optional
 	TerraformMessage string `json:"terraformMessage,omitempty"`
+	// LastErrorTime is the timestamp of the last error that occurred
+	// +kubebuilder:validation:Optional
+	LastErrorTime *metav1.Time `json:"lastErrorTime,omitempty"`
+	// LastErrorMessage contains the last error message that occurred, preserved across reconciliations
+	// +kubebuilder:validation:Optional
+	LastErrorMessage string `json:"lastErrorMessage,omitempty"`
 	// HasChanges indicates whether the last plan contained changes
 	// +kubebuilder:validation:Optional
 	HasChanges bool `json:"hasChanges"`
