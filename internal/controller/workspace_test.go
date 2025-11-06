@@ -68,15 +68,15 @@ func TestWorkspaceController(t *testing.T) {
 	assert.NoError(t, err)
 
 	localModule := `variable "pet_name_length" {
-	default = 2
-	type    = number
-	}
+  default = 2
+  type    = number
+}
 
-	resource "random_pet" "name" {
-	length    = var.pet_name_length
-	separator = "-"
-	}
-	`
+resource "random_pet" "name" {
+  length    = var.pet_name_length
+  separator = "-"
+}
+`
 	modHost.AddFileToModule("my-module", "main.tf", localModule)
 
 	rootDir := t.TempDir() // testutils.TestDataFolder() // Enable to better introspection into test data
@@ -324,9 +324,9 @@ func TestWorkspaceController(t *testing.T) {
 		t.Parallel()
 
 		invalidModule := `resource "invalid_resource" "test" {
-		# Missing required argument
-		invalid_syntax here
-		}`
+  # Missing required argument
+  invalid_syntax here
+}`
 		modHost.AddFileToModule("invalid-module", "main.tf", invalidModule)
 
 		ws := newWs("test-validation-error", modHost.ModuleSource("invalid-module"))
@@ -362,13 +362,13 @@ func TestWorkspaceController(t *testing.T) {
 		t.Parallel()
 
 		validModule := `variable "pet_length" {
-		default = 2
-		type    = number
-		}
+  default = 2
+  type    = number
+}
 
-		resource "random_pet" "test" {
-		length = var.pet_length
-		}`
+resource "random_pet" "test" {
+  length = var.pet_length
+}`
 		modHost.AddFileToModule("fix-module", "main.tf", validModule)
 
 		ws := newWs("test-error-recovery", modHost.ModuleSource("fix-module"))
@@ -383,13 +383,13 @@ func TestWorkspaceController(t *testing.T) {
 		assert.NoError(t, err)
 
 		invalidModule := `variable "pet_length" {
-		default = 2
-		type    = number
-		}
+  default = 2
+  type    = number
+}
 
-		resource "random_pet" "test" {
-		# Missing required length argument
-		}`
+resource "random_pet" "test" {
+  # Missing required length argument
+}`
 		modHost.AddFileToModule("fix-module", "main.tf", invalidModule)
 
 		ws.Spec.Module.Inputs = testutils.Json(map[string]interface{}{
