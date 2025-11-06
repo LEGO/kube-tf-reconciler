@@ -119,6 +119,7 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfv1alpha
 	ws.Status.CurrentRender = rendering
 	err = r.Status().Patch(ctx, ws, client.MergeFrom(old))
 	if err != nil {
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to update workspace status after rendering: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace status after rendering: %v", err), nil)
 		return ctrl.Result{}, err, true
 	}
@@ -557,15 +558,17 @@ func constructOutput(stdout, stderr string, err error) (string, error) {
 
 // updateWorkspaceStatus updates the terraform execution status in the workspace
 func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfv1alphav1.Workspace, phase string, message string, updater func(status *tfv1alphav1.WorkspaceStatus)) error {
-	old := ws.DeepCopy()
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
 			return err
 		}
 
-		// Preserve last error information when entering error state
-		if phase == TFPhaseErrored && ws.Status.TerraformPhase != TFPhaseErrored {
-			ws.Status.LastErrorTime = &metav1.Time{Time: time.Now()}
+		old := ws.DeepCopy()
+
+		// Always preserve error information when in error state
+		if phase == TFPhaseErrored {
+			now := metav1.Now()
+			ws.Status.LastErrorTime = &now
 			ws.Status.LastErrorMessage = message
 		}
 
