@@ -277,6 +277,155 @@ resource "random_pet" "name" {
 		assert.Equal(t, 2, int(ws.Generation))
 		assert.Equal(t, fmt.Sprintf("%s-2", ws.Name), plans.Items[0].Name)
 	})
+
+	t.Run("error message persisted on terraform init failure", func(t *testing.T) {
+		t.Parallel()
+		ws := newWs("test-error-init-failure", "https://invalid-source-that-does-not-exist.com/module")
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			w := object.(*tfv1alphav1.Workspace)
+			return w.Status.TerraformPhase == TFPhaseErrored &&
+				w.Status.LastErrorMessage != "" &&
+				w.Status.LastErrorTime != nil
+		}), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
+		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to init terraform")
+		assert.NotNil(t, ws.Status.LastErrorTime)
+		assert.Equal(t, ws.Status.TerraformMessage, ws.Status.LastErrorMessage)
+	})
+
+	t.Run("error message persisted on terraform validation failure", func(t *testing.T) {
+		t.Parallel()
+		invalidModule := `resource "invalid_resource_type" "test" {
+  invalid_attribute = "value"
+}`
+		modHost.AddFileToModule("invalid-module", "main.tf", invalidModule)
+
+		ws := newWs("test-error-validation-failure", modHost.ModuleSource("invalid-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			w := object.(*tfv1alphav1.Workspace)
+			return w.Status.TerraformPhase == TFPhaseErrored &&
+				w.Status.LastErrorMessage != "" &&
+				w.Status.LastErrorTime != nil
+		}), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
+		assert.NotEmpty(t, ws.Status.LastErrorMessage)
+		assert.NotNil(t, ws.Status.LastErrorTime)
+		assert.False(t, ws.Status.ValidRender)
+	})
+
+	t.Run("error message persisted on terraform plan failure", func(t *testing.T) {
+		t.Parallel()
+		planFailModule := `variable "required_var" {
+  type = string
+}
+
+resource "random_pet" "name" {
+  length = var.required_var
+}`
+		modHost.AddFileToModule("plan-fail-module", "main.tf", planFailModule)
+
+		ws := newWs("test-error-plan-failure", modHost.ModuleSource("plan-fail-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			w := object.(*tfv1alphav1.Workspace)
+			return w.Status.TerraformPhase == TFPhaseErrored &&
+				w.Status.LastErrorMessage != "" &&
+				w.Status.LastErrorTime != nil
+		}), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
+		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to execute terraform plan")
+		assert.NotNil(t, ws.Status.LastErrorTime)
+	})
+
+	t.Run("error message persisted on terraform apply failure", func(t *testing.T) {
+		t.Parallel()
+		applyFailModule := `resource "random_pet" "name" {
+  length    = -1
+  separator = "-"
+}`
+		modHost.AddFileToModule("apply-fail-module", "main.tf", applyFailModule)
+
+		ws := newWs("test-error-apply-failure", modHost.ModuleSource("apply-fail-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			w := object.(*tfv1alphav1.Workspace)
+			return w.Status.TerraformPhase == TFPhaseErrored &&
+				w.Status.LastErrorMessage != "" &&
+				w.Status.LastErrorTime != nil
+		}), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
+		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to apply terraform")
+		assert.NotNil(t, ws.Status.LastErrorTime)
+		assert.NotEmpty(t, ws.Status.LastApplyOutput)
+	})
+
+	t.Run("error message cleared on successful reconciliation", func(t *testing.T) {
+		t.Parallel()
+		ws := newWs("test-error-cleared", modHost.ModuleSource("my-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		assert.NoError(t, err)
+
+		assert.Equal(t, TFPhaseCompleted, ws.Status.TerraformPhase)
+		assert.NotContains(t, ws.Status.TerraformMessage, "Failed")
+	})
+
+	t.Run("error timestamp updated on new error", func(t *testing.T) {
+		t.Parallel()
+		ws := newWs("test-error-timestamp", modHost.ModuleSource("my-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		assert.NoError(t, err)
+
+		firstErrorTime := ws.Status.LastErrorTime
+
+		// Update with invalid module to trigger error
+		invalidModule := `resource "invalid_resource" "test" {}`
+		modHost.AddFileToModule("error-timestamp-module", "main.tf", invalidModule)
+		ws.Spec.Module.Source = modHost.ModuleSource("error-timestamp-module")
+		assert.NoError(t, k.Resources().Update(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			w := object.(*tfv1alphav1.Workspace)
+			return w.Status.TerraformPhase == TFPhaseErrored &&
+				w.Status.LastErrorTime != nil &&
+				(firstErrorTime == nil || w.Status.LastErrorTime.After(firstErrorTime.Time))
+		}), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.NotNil(t, ws.Status.LastErrorTime)
+		if firstErrorTime != nil {
+			assert.True(t, ws.Status.LastErrorTime.After(firstErrorTime.Time))
+		}
+	})
 }
 
 func plansForWs(ws *tfv1alphav1.Workspace) resources.ListOption {
