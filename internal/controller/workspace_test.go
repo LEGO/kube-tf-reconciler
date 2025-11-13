@@ -357,15 +357,24 @@ resource "random_pet" "name" {
 
 	t.Run("error message persisted on terraform apply failure", func(t *testing.T) {
 		t.Parallel()
-		applyFailModule := `resource "random_pet" "name" {
-  length    = -1
-  separator = "-"
+		// Use a module that will pass plan but fail during apply
+		// This uses a null_resource with a local-exec provisioner that will fail
+		applyFailModule := `resource "null_resource" "fail" {
+  provisioner "local-exec" {
+    command = "exit 1"
+  }
 }`
 		modHost.AddFileToModule("apply-fail-module", "main.tf", applyFailModule)
 
 		ws := newWs("test-error-apply-failure", modHost.ModuleSource("apply-fail-module"))
 		ws.Spec.PreventDestroy = false
 		ws.Spec.AutoApply = true
+		// Add null provider before creating the workspace
+		ws.Spec.ProviderSpecs = append(ws.Spec.ProviderSpecs, tfv1alphav1.ProviderSpec{
+			Name:    "null",
+			Version: "3.2.1",
+			Source:  "hashicorp/null",
+		})
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
 		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
