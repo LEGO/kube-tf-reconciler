@@ -252,7 +252,6 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to execute terraform plan: %v", err), nil)
 		return ctrl.Result{}, err, true
 	}
-	ws.Status.LastPlanOutput = ""
 
 	if !changed {
 		log.Info("plan has no changes, marking as completed", "workspace", ws.Name)
@@ -278,7 +277,9 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		s.HasChanges = changed
 		s.NewPlanNeeded = false
 		s.NewApplyNeeded = true
-		s.LastPlanOutput = ""
+		if !changed {
+			s.LastPlanOutput = ""
+		}
 		s.CurrentPlan = &tfv1alphav1.PlanReference{
 			Name:      plan.Name,
 			Namespace: plan.Namespace,

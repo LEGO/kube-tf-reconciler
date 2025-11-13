@@ -37,7 +37,7 @@ func init() {
 }
 
 func TestWorkspaceController(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), time.Minute*5)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{testutils.CRDFolder()},
@@ -328,7 +328,8 @@ resource "random_pet" "name" {
 	t.Run("error message persisted on terraform plan failure", func(t *testing.T) {
 		t.Parallel()
 		planFailModule := `variable "required_var" {
-  type = string
+  type    = string
+  default = "not_a_number"
 }
 
 resource "random_pet" "name" {
