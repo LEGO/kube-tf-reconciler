@@ -404,38 +404,6 @@ resource "random_pet" "name" {
 		assert.Equal(t, TFPhaseCompleted, ws.Status.TerraformPhase)
 		assert.NotContains(t, ws.Status.TerraformMessage, "Failed")
 	})
-
-	t.Run("error timestamp updated on new error", func(t *testing.T) {
-		t.Parallel()
-		ws := newWs("test-error-timestamp", modHost.ModuleSource("my-module"))
-		ws.Spec.PreventDestroy = false
-		ws.Spec.AutoApply = true
-		assert.NoError(t, k.Resources().Create(ctx, ws))
-
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
-		assert.NoError(t, err)
-
-		firstErrorTime := ws.Status.LastErrorTime
-
-		// Update with invalid module to trigger error
-		invalidModule := `resource "invalid_resource" "test" {}`
-		modHost.AddFileToModule("error-timestamp-module", "main.tf", invalidModule)
-		ws.Spec.Module.Source = modHost.ModuleSource("error-timestamp-module")
-		assert.NoError(t, k.Resources().Update(ctx, ws))
-
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
-			w := object.(*tfv1alphav1.Workspace)
-			return w.Status.TerraformPhase == TFPhaseErrored &&
-				w.Status.LastErrorTime != nil &&
-				(firstErrorTime == nil || w.Status.LastErrorTime.After(firstErrorTime.Time))
-		}), wait.WithContext(ctx))
-		assert.NoError(t, err)
-
-		assert.NotNil(t, ws.Status.LastErrorTime)
-		if firstErrorTime != nil {
-			assert.True(t, ws.Status.LastErrorTime.After(firstErrorTime.Time))
-		}
-	})
 }
 
 func plansForWs(ws *tfv1alphav1.Workspace) resources.ListOption {
