@@ -37,7 +37,7 @@ func init() {
 }
 
 func TestWorkspaceController(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute*5)
 
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{testutils.CRDFolder()},
