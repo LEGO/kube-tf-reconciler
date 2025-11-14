@@ -37,7 +37,7 @@ func init() {
 }
 
 func TestWorkspaceController(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), time.Minute*5)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute*10)
 
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{testutils.CRDFolder()},
@@ -276,6 +276,133 @@ resource "random_pet" "name" {
 		assert.Len(t, plans.Items, 1)
 		assert.Equal(t, 2, int(ws.Generation))
 		assert.Equal(t, fmt.Sprintf("%s-2", ws.Name), plans.Items[0].Name)
+	})
+
+	t.Run("error message persisted on terraform init failure", func(t *testing.T) {
+		t.Parallel()
+		ws := newWs("test-error-init-failure", "https://invalid-source-that-does-not-exist.com/module")
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			w := object.(*tfv1alphav1.Workspace)
+			return w.Status.TerraformPhase == TFPhaseErrored &&
+				w.Status.LastErrorMessage != "" &&
+				w.Status.LastErrorTime != nil
+		}), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
+		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to init terraform")
+		assert.NotNil(t, ws.Status.LastErrorTime)
+		assert.Equal(t, ws.Status.TerraformMessage, ws.Status.LastErrorMessage)
+	})
+
+	t.Run("error message persisted on terraform validation failure", func(t *testing.T) {
+		t.Parallel()
+		invalidModule := `resource "invalid_resource_type" "test" {
+  invalid_attribute = "value"
+}`
+		modHost.AddFileToModule("invalid-module", "main.tf", invalidModule)
+
+		ws := newWs("test-error-validation-failure", modHost.ModuleSource("invalid-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			w := object.(*tfv1alphav1.Workspace)
+			return w.Status.TerraformPhase == TFPhaseErrored &&
+				w.Status.LastErrorMessage != "" &&
+				w.Status.LastErrorTime != nil
+		}), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
+		assert.NotEmpty(t, ws.Status.LastErrorMessage)
+		assert.NotNil(t, ws.Status.LastErrorTime)
+		assert.False(t, ws.Status.ValidRender)
+	})
+
+	t.Run("error message persisted on terraform plan failure", func(t *testing.T) {
+		t.Parallel()
+		planFailModule := `variable "required_var" {
+  type    = string
+  default = "not_a_number"
+}
+
+resource "random_pet" "name" {
+  length = var.required_var
+}`
+		modHost.AddFileToModule("plan-fail-module", "main.tf", planFailModule)
+
+		ws := newWs("test-error-plan-failure", modHost.ModuleSource("plan-fail-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			w := object.(*tfv1alphav1.Workspace)
+			return w.Status.TerraformPhase == TFPhaseErrored &&
+				w.Status.LastErrorMessage != "" &&
+				w.Status.LastErrorTime != nil
+		}), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
+		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to execute terraform plan")
+		assert.NotNil(t, ws.Status.LastErrorTime)
+	})
+
+	t.Run("error message persisted on terraform apply failure", func(t *testing.T) {
+		t.Parallel()
+		// Use a module that will pass plan but fail during apply
+		// This uses a null_resource with a local-exec provisioner that will fail
+		applyFailModule := `resource "null_resource" "fail" {
+  provisioner "local-exec" {
+    command = "exit 1"
+  }
+}`
+		modHost.AddFileToModule("apply-fail-module", "main.tf", applyFailModule)
+
+		ws := newWs("test-error-apply-failure", modHost.ModuleSource("apply-fail-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		// Add null provider before creating the workspace
+		ws.Spec.ProviderSpecs = append(ws.Spec.ProviderSpecs, tfv1alphav1.ProviderSpec{
+			Name:    "null",
+			Version: "3.2.1",
+			Source:  "hashicorp/null",
+		})
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+			w := object.(*tfv1alphav1.Workspace)
+			return w.Status.TerraformPhase == TFPhaseErrored &&
+				w.Status.LastErrorMessage != "" &&
+				w.Status.LastErrorTime != nil
+		}), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
+		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to apply terraform")
+		assert.NotNil(t, ws.Status.LastErrorTime)
+		assert.NotEmpty(t, ws.Status.LastApplyOutput)
+	})
+
+	t.Run("error message cleared on successful reconciliation", func(t *testing.T) {
+		t.Parallel()
+		ws := newWs("test-error-cleared", modHost.ModuleSource("my-module"))
+		ws.Spec.PreventDestroy = false
+		ws.Spec.AutoApply = true
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		assert.NoError(t, err)
+
+		assert.Equal(t, TFPhaseCompleted, ws.Status.TerraformPhase)
+		assert.NotContains(t, ws.Status.TerraformMessage, "Failed")
 	})
 }
 

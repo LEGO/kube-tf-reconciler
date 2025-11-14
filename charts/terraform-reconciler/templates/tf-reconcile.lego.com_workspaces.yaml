@@ -297,6 +297,15 @@ spec:
               lastApplyOutput:
                 description: LastApplyOutput contains the raw terraform apply output
                 type: string
+              lastErrorMessage:
+                description: LastErrorMessage contains the last error message that
+                  occurred, preserved across reconciliations
+                type: string
+              lastErrorTime:
+                description: LastErrorTime is the timestamp of the last error that
+                  occurred
+                format: date-time
+                type: string
               lastExecutionTime:
                 description: LastExecutionTime is the time the last terraform operation
                   completed

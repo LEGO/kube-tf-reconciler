@@ -62,6 +62,9 @@ func convertToCtyValue(value interface{}) cty.Value {
 		}
 		return cty.ObjectVal(m)
 	case []interface{}:
+		if len(v) == 0 {
+			return cty.ListValEmpty(cty.DynamicPseudoType)
+		}
 		var list []cty.Value
 		for _, item := range v {
 			list = append(list, convertToCtyValue(item))
