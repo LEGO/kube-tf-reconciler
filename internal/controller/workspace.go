@@ -628,8 +628,6 @@ func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfv
 		}
 		old := ws.DeepCopy()
 
-		old := ws.DeepCopy()
-
 		// Always preserve error information when in error state
 		if phase == TFPhaseErrored {
 			now := metav1.Now()
