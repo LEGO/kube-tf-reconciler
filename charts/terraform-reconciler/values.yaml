@@ -9,6 +9,9 @@ image:
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
+serviceMonitor:
+  enabled: true
+  labels: {}
 
 # Environment variables for the reconciler container
 env:

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tfv1alphav1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
+	"github.com/LEGO/kube-tf-reconciler/pkg/metrics"
 	"github.com/LEGO/kube-tf-reconciler/pkg/render"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/hashicorp/terraform-exec/tfexec"
@@ -67,8 +68,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("failed to get workspace %s: %w", req.String(), err)
 		}
+		metrics.CleanupWorkspaceMetrics(req.Namespace, req.Name)
 		return ctrl.Result{}, nil
 	}
+
+	// Record reconciliation attempt
+	metrics.RecordReconciliation(ws.Namespace, ws.Name)
+
 	logf.IntoContext(ctx, log.WithValues("workspace", req.String()))
 	if ws.Status.ObservedGeneration == ws.Generation && time.Now().Before(ws.Status.NextRefreshTimestamp.Time) && !ws.ManualApplyRequested() {
 		return ctrl.Result{RequeueAfter: time.Until(ws.Status.NextRefreshTimestamp.Time)}, nil
@@ -644,6 +650,11 @@ func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfv
 
 		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	})
+
+	if err == nil {
+		metrics.SetWorkspacePhase(ws.Namespace, ws.Name, phase)
+	}
+
 	return err
 }
 
