@@ -9,7 +9,7 @@ var (
 	WorkspacePhase = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "kube_tf_workspace_phase",
-			Help: "Current phase of the Terraform workspace (0=Idle, 1=Planning, 2=Applying, 3=Completed, 4=Errored)",
+			Help: "State of Terraform workspace in specific phase (value is 1 for the current phase)",
 		},
 		[]string{"namespace", "workspace", "phase"},
 	)
