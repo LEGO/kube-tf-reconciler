@@ -1,0 +1,16 @@
+# Service to expose metrics endpoint
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.appName }}-metrics-service
+  namespace: system
+  labels:
+    app: {{ .Values.appName }}
+spec:
+  ports:
+  - name: metrics
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: {{ .Values.appName }}

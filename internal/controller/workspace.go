@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tfv1alphav1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
+	"github.com/LEGO/kube-tf-reconciler/pkg/metrics"
 	"github.com/LEGO/kube-tf-reconciler/pkg/render"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/hashicorp/terraform-exec/tfexec"
@@ -644,6 +645,11 @@ func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfv
 
 		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	})
+
+	if err == nil {
+		metrics.SetWorkspacePhase(ws.Namespace, ws.Name, phase)
+	}
+
 	return err
 }
 

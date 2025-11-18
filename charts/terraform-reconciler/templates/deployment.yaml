@@ -38,6 +38,10 @@ spec:
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
         volumeMounts:
           - mountPath: /tmp
             name: terraform-data
