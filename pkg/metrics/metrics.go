@@ -13,11 +13,20 @@ var (
 		},
 		[]string{"namespace", "workspace", "phase"},
 	)
+
+	WorkspaceReconciliations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kube_tf_workspace_reconciliations_total",
+			Help: "Total number of reconciliation attempts for each workspace",
+		},
+		[]string{"namespace", "workspace"},
+	)
 )
 
 func init() {
 	metrics.Registry.MustRegister(
 		WorkspacePhase,
+		WorkspaceReconciliations,
 	)
 }
 
@@ -37,4 +46,8 @@ func CleanupWorkspaceMetrics(namespace, workspace string) {
 		"namespace": namespace,
 		"workspace": workspace,
 	})
+}
+
+func RecordReconciliation(namespace, workspace string) {
+	WorkspaceReconciliations.WithLabelValues(namespace, workspace).Inc()
 }

@@ -71,6 +71,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		metrics.CleanupWorkspaceMetrics(req.Namespace, req.Name)
 		return ctrl.Result{}, nil
 	}
+
+	// Record reconciliation attempt
+	metrics.RecordReconciliation(ws.Namespace, ws.Name)
+
 	logf.IntoContext(ctx, log.WithValues("workspace", req.String()))
 	if ws.Status.ObservedGeneration == ws.Generation && time.Now().Before(ws.Status.NextRefreshTimestamp.Time) && !ws.ManualApplyRequested() {
 		return ctrl.Result{RequeueAfter: time.Until(ws.Status.NextRefreshTimestamp.Time)}, nil
