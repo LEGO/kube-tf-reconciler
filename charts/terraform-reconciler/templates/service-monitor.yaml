@@ -1,11 +1,13 @@
-{{ if .Values.serviceMonitor.enabled -}}
+{{- if .Values.serviceMonitor.enabled -}}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ .Values.appName }}-svc-monitor
   labels:
-    monitoring.stack: novus
     app: {{ .Values.appName }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   namespaceSelector:
     matchNames:

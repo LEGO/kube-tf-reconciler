@@ -31,3 +31,10 @@ func SetWorkspacePhase(namespace, workspace, phase string) {
 		WorkspacePhase.WithLabelValues(namespace, workspace, phase).Set(1)
 	}
 }
+
+func CleanupWorkspaceMetrics(namespace, workspace string) {
+	WorkspacePhase.DeletePartialMatch(prometheus.Labels{
+		"namespace": namespace,
+		"workspace": workspace,
+	})
+}

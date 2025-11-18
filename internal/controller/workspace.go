@@ -68,6 +68,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("failed to get workspace %s: %w", req.String(), err)
 		}
+		metrics.CleanupWorkspaceMetrics(req.Namespace, req.Name)
 		return ctrl.Result{}, nil
 	}
 	logf.IntoContext(ctx, log.WithValues("workspace", req.String()))
