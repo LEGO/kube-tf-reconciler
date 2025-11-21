@@ -262,6 +262,15 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 	log := logf.FromContext(ctx)
 
 	if !ws.Status.NewPlanNeeded {
+		now := metav1.Now()
+		err := r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan bypassed - no changes needed", func(s *tfv1alphav1.WorkspaceStatus) {
+			s.HasChanges = false
+			s.LastExecutionTime = &now
+			s.LastPlanOutput = ""
+		})
+		if err != nil {
+			return ctrl.Result{}, err, true
+		}
 		return ctrl.Result{}, nil, false
 	}
 
