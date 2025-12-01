@@ -36,6 +36,7 @@ const (
 
 	defaultPlanHistoryLimit = 3
 	planCreationTimeout     = 2 * time.Second
+	nextRefreshInterval     = 10 * time.Minute
 
 	TFErrEventReason      = "TerraformError"
 	TFPlanEventReason     = "TerraformPlan"
@@ -550,7 +551,7 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 
 		old = ws.DeepCopy()
 		ws.Status.ObservedGeneration = ws.Generation
-		ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(5 * time.Minute))
+		ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(nextRefreshInterval))
 
 		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	})
