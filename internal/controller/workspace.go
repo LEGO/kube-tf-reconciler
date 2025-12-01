@@ -261,6 +261,11 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
+	if ws.ManualApplyRequested() {
+		log.V(DebugLevel).Info("manual apply requested, proceeding with existing plan")
+		return ctrl.Result{}, nil, false
+	}
+
 	if !ws.Status.NewPlanNeeded {
 		now := metav1.Now()
 		err := r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan bypassed - no changes needed", func(s *tfv1alphav1.WorkspaceStatus) {
