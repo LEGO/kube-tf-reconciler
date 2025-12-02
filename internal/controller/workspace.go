@@ -28,6 +28,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -1037,7 +1038,8 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 
 	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
 		// Not ours, assume someone else handles refresh of this workspace and push next check into the future
-		return ctrl.Result{RequeueAfter: nextRefreshInterval}, nil, true
+		expiresAt := lease.Spec.RenewTime.Add(time.Duration(ptr.Deref(lease.Spec.LeaseDurationSeconds, 0)))
+		return ctrl.Result{RequeueAfter: expiresAt.Sub(time.Now())}, nil, true
 	}
 
 	// We got the lease! We can go crazy
