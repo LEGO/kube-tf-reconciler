@@ -1018,11 +1018,14 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 		return ctrl.Result{}, fmt.Errorf("unexpected failure when setting owner reference"), true
 	}
 
-	// We try to create the lease, we don't do any error checking here as we will check again right after
+	// We try to create the lease,
 	createErr := r.Client.Create(ctx, &ownedLease)
 
 	var lease coordinationv1.Lease
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: ownedLease.Namespace, Name: ownedLease.Name}, &lease); err != nil {
+	err = retry.OnError(retry.DefaultRetry, apierrors.IsNotFound, func() error {
+		return r.Client.Get(ctx, types.NamespacedName{Namespace: ownedLease.Namespace, Name: ownedLease.Name}, &lease)
+	})
+	if err != nil {
 		// Failed to get lease, this is unexpected so let's try again soon after
 		return ctrl.Result{RequeueAfter: time.Duration(rand.Int()%10+10) * time.Second}, errors.Join(errors.New("failed to get lease"), createErr, err), true
 	}
