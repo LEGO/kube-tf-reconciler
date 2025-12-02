@@ -1022,10 +1022,7 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 		// Failed to get lease, this is unexpected so let's try again soon after
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("failed to get lease: %w", err), true
 	}
-	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
-		// Not ours, assume someone else handles refresh of this workspace and push next check into the future
-		return ctrl.Result{RequeueAfter: nextRefreshInterval}, nil, true
-	}
+
 	if lease.Spec.RenewTime.Time.Add(time.Duration(leaseDurationSeconds) * time.Second).Before(time.Now()) {
 		// Expired, try and take over.
 		// We do this by doing a delete + create. We ignore the delete error as it might have been deleted already.
@@ -1035,6 +1032,11 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 		if err != nil {
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("failed to takeover lease: %w", err), true
 		}
+	}
+
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
+		// Not ours, assume someone else handles refresh of this workspace and push next check into the future
+		return ctrl.Result{RequeueAfter: nextRefreshInterval}, nil, true
 	}
 
 	// We got the lease! We can go crazy
