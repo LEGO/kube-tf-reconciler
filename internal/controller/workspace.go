@@ -79,8 +79,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
+	// Attempt to acquire lease, if we don't get it, then we don't proceed
 	if res, err, ret := r.acquireLease(ctx, ws); ret {
-		return res, fmt.Errorf("acquire lease: %w", err)
+		if err != nil {
+			err = fmt.Errorf("acquire lease: %w", err)
+		}
+
+		return res, err
 	}
 
 	// Record reconciliation attempt
@@ -120,6 +125,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, fmt.Errorf("handleReschedule: %w", err)
 	}
 
+	// We only release the lease if everything went well, this allows us to re-use any cached data we
+	// may have accrued during reconciliation
 	if res, err, ret := r.releaseLease(ctx, ws); ret {
 		return res, fmt.Errorf("release lease: %w", err)
 	}
@@ -980,6 +987,8 @@ func leaseName(ws *tfv1alphav1.Workspace) string {
 }
 
 func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool) {
+	// We need a stable and unique value for holder identity, let's assume hostname is good enough as it should equal
+	// the pod name.
 	holderIdentity, err := os.Hostname()
 	if err != nil {
 		return ctrl.Result{}, err, true
@@ -1005,10 +1014,12 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 		return ctrl.Result{}, err, true
 	}
 
+	// We try to create the lease, we don't do any error checking here as we will check again right after
 	_ = r.Client.Create(ctx, &ownedLease)
 
 	var lease coordinationv1.Lease
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: ownedLease.Namespace, Name: ownedLease.Name}, &lease); err != nil {
+		// Failed to get lease, this is unexpected so let's try again soon after
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("failed to get lease: %w", err), true
 	}
 	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
@@ -1016,8 +1027,10 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 		return ctrl.Result{RequeueAfter: nextRefreshInterval}, nil, true
 	}
 	if lease.Spec.RenewTime.Time.Add(time.Duration(leaseDurationSeconds) * time.Second).Before(time.Now()) {
-		// Expired, take over
+		// Expired, try and take over.
+		// We do this by doing a delete + create. We ignore the delete error as it might have been deleted already.
 		_ = r.Client.Delete(ctx, &lease)
+		// Verify that create is successful, if it is it means we took over the lease
 		err = r.Client.Create(ctx, &ownedLease)
 		if err != nil {
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("failed to takeover lease: %w", err), true
