@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1023,7 +1024,7 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 	var lease coordinationv1.Lease
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: ownedLease.Namespace, Name: ownedLease.Name}, &lease); err != nil {
 		// Failed to get lease, this is unexpected so let's try again soon after
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, errors.Join(errors.New("failed to get lease"), err, createErr), true
+		return ctrl.Result{RequeueAfter: time.Duration(rand.Int()%10+10) * time.Second}, errors.Join(errors.New("failed to get lease"), createErr, err), true
 	}
 
 	if lease.Spec.RenewTime.Time.Add(time.Duration(leaseDurationSeconds) * time.Second).Before(time.Now()) {
@@ -1041,7 +1042,7 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
 		// Not ours, assume someone else handles refresh of this workspace and push next check into the future
 		expiresAt := lease.Spec.RenewTime.Add(time.Duration(ptr.Deref(lease.Spec.LeaseDurationSeconds, 0)))
-		return ctrl.Result{RequeueAfter: expiresAt.Sub(time.Now())}, nil, true
+		return ctrl.Result{RequeueAfter: time.Duration(rand.Int()%20) + expiresAt.Sub(time.Now())}, nil, true
 	}
 
 	// We got the lease! We can go crazy
