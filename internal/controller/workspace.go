@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1017,12 +1018,12 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 	}
 
 	// We try to create the lease, we don't do any error checking here as we will check again right after
-	_ = r.Client.Create(ctx, &ownedLease)
+	createErr := r.Client.Create(ctx, &ownedLease)
 
 	var lease coordinationv1.Lease
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: ownedLease.Namespace, Name: ownedLease.Name}, &lease); err != nil {
 		// Failed to get lease, this is unexpected so let's try again soon after
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("failed to get lease: %w", err), true
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, errors.Join(errors.New("failed to get lease"), err, createErr), true
 	}
 
 	if lease.Spec.RenewTime.Time.Add(time.Duration(leaseDurationSeconds) * time.Second).Before(time.Now()) {
