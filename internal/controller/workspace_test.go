@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,14 +17,22 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/klient/k8s"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
@@ -49,6 +58,9 @@ func TestWorkspaceController(t *testing.T) {
 	modHost, shutdown := testutils.NewModuleHost()
 
 	err := tfv1alphav1.AddToScheme(testEnv.Scheme)
+	assert.NoError(t, err)
+
+	err = coordinationv1.AddToScheme(testEnv.Scheme)
 	assert.NoError(t, err)
 
 	cfg, err := testEnv.Start()
@@ -88,7 +100,7 @@ resource "random_pet" "name" {
 
 		Tf:       runner.New(rootDir),
 		Renderer: render.NewFileRender(rootDir),
-	}).SetupWithManager(mgr)
+	}).SetupWithManager(ctx, mgr)
 
 	go mgr.Start(ctx)
 
@@ -441,4 +453,202 @@ func newWs(name, moduleSource string) *tfv1alphav1.Workspace {
 			},
 		},
 	}
+}
+
+func TestLeaseReconciliationBehaviour(t *testing.T) {
+	modHost, shutdown := testutils.NewModuleHost()
+	defer shutdown()
+
+	localModule := `variable "pet_name_length" {
+  default = 2
+  type    = number
+}
+
+resource "random_pet" "name" {
+  length    = var.pet_name_length
+  separator = "-"
+}
+`
+	modHost.AddFileToModule("my-module", "main.tf", localModule)
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
+
+	freeWs := newWs("test-free", modHost.ModuleSource("my-module"))
+	lockedWs := newWs("test-locked", modHost.ModuleSource("my-module"))
+	expiredWs := newWs("test-expired", modHost.ModuleSource("my-module"))
+	now := metav1.NewMicroTime(time.Now())
+	past := metav1.NewMicroTime(now.Add(-10 * time.Minute))
+	otherLease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      leaseName(lockedWs),
+			Namespace: lockedWs.Namespace,
+		},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       ptr.To("someone-else"),
+			LeaseDurationSeconds: ptr.To[int32](300),
+			AcquireTime:          &now,
+			RenewTime:            &now,
+		},
+	}
+	expiredLease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      leaseName(expiredWs),
+			Namespace: lockedWs.Namespace,
+		},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       ptr.To("someone-else"),
+			LeaseDurationSeconds: ptr.To[int32](300),
+			AcquireTime:          &past,
+			RenewTime:            &past,
+		},
+	}
+	pp := tfv1alphav1.Plan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "plan-for-expired-ws",
+			Namespace: expiredWs.Namespace,
+		},
+	}
+	client := clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(freeWs, lockedWs, expiredWs, &pp).
+		WithObjects(freeWs, lockedWs, expiredWs, otherLease, expiredLease).
+		Build()
+
+	rootDir := t.TempDir()
+	reconciler := &WorkspaceReconciler{
+		Client:   client,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+
+		Tf:       runner.New(rootDir),
+		Renderer: render.NewFileRender(rootDir),
+		leases:   &sync.Map{},
+	}
+
+	t.Run("acquisition", func(t *testing.T) {
+		t.Run("can acquire lease for free workspace", func(t *testing.T) {
+			t.Cleanup(func() {
+				reconciler.leases = &sync.Map{}
+				assert.NoError(t, client.Delete(t.Context(), &coordinationv1.Lease{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      leaseName(freeWs),
+						Namespace: freeWs.Namespace,
+					},
+				}))
+			})
+			_, err, ret := reconciler.acquireLease(t.Context(), freeWs)
+			assert.False(t, ret)
+			assert.NoError(t, err)
+
+			_, exists := reconciler.leases.Load(leaseName(freeWs))
+			assert.True(t, exists)
+
+			var lease coordinationv1.Lease
+			err = client.Get(context.TODO(), types.NamespacedName{
+				Name:      leaseName(freeWs),
+				Namespace: freeWs.Namespace,
+			}, &lease)
+			assert.NoError(t, err)
+		})
+
+		t.Run("can not acquire lease for locked workspace", func(t *testing.T) {
+			_, err, ret := reconciler.acquireLease(t.Context(), lockedWs)
+			assert.True(t, ret)
+			assert.NoError(t, err)
+		})
+
+		t.Run("can takeover expired lease", func(t *testing.T) {
+			t.Cleanup(func() {
+				reconciler.leases = &sync.Map{}
+				assert.NoError(t, client.Delete(t.Context(), &coordinationv1.Lease{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      leaseName(expiredWs),
+						Namespace: expiredWs.Namespace,
+					},
+				}))
+			})
+
+			_, err, ret := reconciler.acquireLease(t.Context(), expiredWs)
+			assert.False(t, ret)
+			assert.NoError(t, err)
+
+			_, exists := reconciler.leases.Load(leaseName(expiredWs))
+			assert.True(t, exists)
+
+			var lease coordinationv1.Lease
+			err = client.Get(context.TODO(), types.NamespacedName{
+				Name:      leaseName(expiredWs),
+				Namespace: expiredWs.Namespace,
+			}, &lease)
+			assert.NoError(t, err)
+		})
+	})
+
+	t.Run("release", func(t *testing.T) {
+		t.Run("when releasing non-leased workspace, returns true but no error", func(t *testing.T) {
+			_, err, ret := reconciler.releaseLease(t.Context(), freeWs)
+			assert.NoError(t, err)
+			assert.True(t, ret)
+		})
+		t.Run("can release lease for locked workspace", func(t *testing.T) {
+			_, err, ret := reconciler.acquireLease(t.Context(), freeWs)
+			assert.NoError(t, err)
+			assert.False(t, ret)
+
+			var lease coordinationv1.Lease
+			err = client.Get(context.TODO(), types.NamespacedName{
+				Name:      leaseName(freeWs),
+				Namespace: freeWs.Namespace,
+			}, &lease)
+			assert.NoError(t, err)
+
+			_, err, ret = reconciler.releaseLease(t.Context(), freeWs)
+			assert.NoError(t, err)
+			assert.False(t, ret)
+
+			err = client.Get(context.TODO(), types.NamespacedName{
+				Name:      leaseName(freeWs),
+				Namespace: freeWs.Namespace,
+			}, &lease)
+			assert.True(t, apierrors.IsNotFound(err))
+		})
+		t.Run("will not release lease for workspace locked by others", func(t *testing.T) {
+			_, err, ret := reconciler.releaseLease(t.Context(), freeWs)
+			assert.NoError(t, err)
+			assert.True(t, ret)
+
+			var lease coordinationv1.Lease
+			err = client.Get(context.TODO(), types.NamespacedName{
+				Name:      leaseName(lockedWs),
+				Namespace: lockedWs.Namespace,
+			}, &lease)
+			assert.NoError(t, err)
+		})
+	})
+
+	t.Run("can acquire and free lease for free workspace", func(t *testing.T) {
+		_, err := reconciler.Reconcile(context.TODO(), reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: freeWs.Namespace,
+				Name:      freeWs.Name,
+			},
+		})
+
+		require.NoError(t, err)
+		var lease coordinationv1.Lease
+		err = client.Get(context.TODO(), types.NamespacedName{
+			Name:      leaseName(freeWs),
+			Namespace: freeWs.Namespace,
+		}, &lease)
+		assert.True(t, apierrors.IsNotFound(err))
+		var plan tfv1alphav1.Plan
+		err = client.Get(context.TODO(), types.NamespacedName{
+			Name:      fmt.Sprintf("%s-%d", freeWs.Name, freeWs.Generation),
+			Namespace: freeWs.Namespace,
+		}, &plan)
+		assert.NoError(t, err)
+	})
 }

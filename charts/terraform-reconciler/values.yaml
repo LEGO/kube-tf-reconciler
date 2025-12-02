@@ -8,6 +8,9 @@ image:
   tag: sha-ed4a43a
   pullPolicy: IfNotPresent
 
+deployment:
+  replicas: 1
+
 imagePullSecrets: []
 serviceMonitor:
   enabled: true

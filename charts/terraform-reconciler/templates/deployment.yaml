@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/part-of: terraform-reconciler
   name: {{ .Values.appName }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.deployment.replicas }}
   selector:
     matchLabels:
       app: {{ .Values.appName }}
