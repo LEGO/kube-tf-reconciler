@@ -1,6 +1,10 @@
 name: Build and Push Image to GHCR
 
 on:
+  pull_request:
+    paths:
+      - "**/*.go"
+      - go.mod
   push:
     branches: [ main ]
 
@@ -28,6 +32,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=sha
+            type=ref,event=pr
           flavor: |
             latest=false
   
