@@ -1047,13 +1047,14 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 }
 
 func (r *WorkspaceReconciler) releaseLease(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool) {
-	lease, ok := r.leases.LoadAndDelete(leaseName(ws))
+	leaseObj, ok := r.leases.LoadAndDelete(leaseName(ws))
 	if !ok {
 		// Should we handle this error case? This should never happen...
 		slog.ErrorContext(ctx, "lease not found during release", "lease", leaseName(ws))
 		return ctrl.Result{}, nil, true
 	}
-	err := r.Client.Delete(ctx, lease.(*coordinationv1.Lease))
+	lease := leaseObj.(coordinationv1.Lease)
+	err := r.Client.Delete(ctx, &lease)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("failed to delete lease during release: %w", err), true
 	}
