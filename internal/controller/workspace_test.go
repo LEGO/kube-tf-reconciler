@@ -16,6 +16,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
@@ -49,6 +50,9 @@ func TestWorkspaceController(t *testing.T) {
 	modHost, shutdown := testutils.NewModuleHost()
 
 	err := tfv1alphav1.AddToScheme(testEnv.Scheme)
+	assert.NoError(t, err)
+
+	err = coordinationv1.AddToScheme(testEnv.Scheme)
 	assert.NoError(t, err)
 
 	cfg, err := testEnv.Start()
@@ -88,7 +92,7 @@ resource "random_pet" "name" {
 
 		Tf:       runner.New(rootDir),
 		Renderer: render.NewFileRender(rootDir),
-	}).SetupWithManager(mgr)
+	}).SetupWithManager(ctx, mgr)
 
 	go mgr.Start(ctx)
 

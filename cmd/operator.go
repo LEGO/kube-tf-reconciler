@@ -10,6 +10,7 @@ import (
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -24,6 +25,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(tfreconcilev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(coordinationv1.AddToScheme(scheme))
 }
 
 // operatorCmd represents the operator command
@@ -65,7 +67,7 @@ var operatorCmd = &cobra.Command{
 			Renderer: render.NewFileRender(cfg.WorkspacePath),
 		}
 
-		if err = reconciler.SetupWithManager(mgr); err != nil {
+		if err = reconciler.SetupWithManager(cmd.Context(), mgr); err != nil {
 			slog.Error("unable to create controller", "error", err)
 			os.Exit(1)
 		}

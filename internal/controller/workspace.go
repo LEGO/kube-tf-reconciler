@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tfv1alphav1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
@@ -16,6 +18,7 @@ import (
 	"github.com/hashicorp/terraform-exec/tfexec"
 	tfjson "github.com/hashicorp/terraform-json"
 	authv1 "k8s.io/api/authentication/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -60,10 +64,12 @@ type WorkspaceReconciler struct {
 
 	Tf       *runner.Exec
 	Renderer render.Renderer
+	leases   *sync.Map
 }
 
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
 	ws := &tfv1alphav1.Workspace{}
 	if err := r.Client.Get(ctx, req.NamespacedName, ws); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -71,6 +77,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		metrics.CleanupWorkspaceMetrics(req.Namespace, req.Name)
 		return ctrl.Result{}, nil
+	}
+
+	if res, err, ret := r.acquireLease(ctx, ws); ret {
+		return res, fmt.Errorf("acquire lease: %w", err)
 	}
 
 	// Record reconciliation attempt
@@ -108,6 +118,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if res, err, ret = r.handleReschedule(ctx, ws); ret {
 		return res, fmt.Errorf("handleReschedule: %w", err)
+	}
+
+	if res, err, ret := r.releaseLease(ctx, ws); ret {
+		return res, fmt.Errorf("release lease: %w", err)
 	}
 
 	log.V(DebugLevel).Info("reconcile completed")
@@ -568,7 +582,10 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *WorkspaceReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
+	r.leases = &sync.Map{}
+	go r.refreshLeases(ctx)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&tfv1alphav1.Workspace{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 5}). // Match terraform execution capacity
@@ -956,4 +973,98 @@ func (r *WorkspaceReconciler) cleanupOldPlans(ctx context.Context, ws *tfv1alpha
 	}
 
 	return nil
+}
+
+func leaseName(ws *tfv1alphav1.Workspace) string {
+	return fmt.Sprintf("tf-workspace-%s", ws.Name)
+}
+
+func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool) {
+	holderIdentity, err := os.Hostname()
+	if err != nil {
+		return ctrl.Result{}, err, true
+	}
+
+	leaseDurationSeconds := 300
+	renewTime := metav1.NewMicroTime(time.Now())
+	ownedLease := coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      leaseName(ws),
+			Namespace: ws.Namespace,
+		},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       &holderIdentity,
+			LeaseDurationSeconds: pointer.Int32(int32(leaseDurationSeconds)),
+			RenewTime:            &renewTime,
+			AcquireTime:          &renewTime,
+		},
+	}
+
+	err = controllerutil.SetOwnerReference(ws, &ownedLease, r.Scheme)
+	if err != nil {
+		return ctrl.Result{}, err, true
+	}
+
+	_ = r.Client.Create(ctx, &ownedLease)
+
+	var lease coordinationv1.Lease
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: ownedLease.Namespace, Name: ownedLease.Name}, &lease); err != nil {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("failed to get lease: %w", err), true
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
+		// Not ours, assume someone else handles refresh of this workspace and push next check into the future
+		return ctrl.Result{RequeueAfter: nextRefreshInterval}, nil, true
+	}
+	if lease.Spec.RenewTime.Time.Add(time.Duration(leaseDurationSeconds) * time.Second).Before(time.Now()) {
+		// Expired, take over
+		_ = r.Client.Delete(ctx, &lease)
+		err = r.Client.Create(ctx, &ownedLease)
+		if err != nil {
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("failed to takeover lease: %w", err), true
+		}
+	}
+
+	// We got the lease! We can go crazy
+	err = r.addLease(lease)
+
+	return ctrl.Result{}, nil, false
+}
+
+func (r *WorkspaceReconciler) releaseLease(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool) {
+	r.leases.Delete(leaseName(ws))
+	return ctrl.Result{}, nil, false
+}
+
+func (r *WorkspaceReconciler) addLease(lease coordinationv1.Lease) error {
+	r.leases.Store(lease.Name, lease)
+
+	return nil
+}
+
+func (r *WorkspaceReconciler) refreshLeases(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		r.leases.Range(func(key, value interface{}) bool {
+			lease := value.(coordinationv1.Lease)
+
+			err := r.Client.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, &lease)
+			if err != nil {
+				slog.ErrorContext(ctx, "failed to get lease for refresh", "lease", lease.Name, "namespace", lease.Namespace, "error", err)
+				return true
+			}
+
+			now := metav1.NewMicroTime(time.Now())
+			lease.Spec.RenewTime = &now
+			err = r.Client.Update(ctx, &lease)
+			if err != nil {
+				slog.ErrorContext(ctx, "failed to refresh lease", "lease", lease.Name, "namespace", lease.Namespace, "error", err)
+				return true
+			}
+
+			return true
+		})
+		time.Sleep(time.Minute)
+	}
 }
