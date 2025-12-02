@@ -88,6 +88,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 		return res, err
 	}
+	defer func() {
+		// We only release the lease if everything went well, this allows us to re-use any cached data we
+		// may have accrued during reconciliation
+		if _, err, ret := r.releaseLease(ctx, ws); ret {
+			slog.ErrorContext(ctx, "failed to release lease", "workspace", req.String(), "error", err)
+		}
+	}()
 
 	// Record reconciliation attempt
 	metrics.RecordReconciliation(ws.Namespace, ws.Name)
@@ -124,12 +131,6 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if res, err, ret = r.handleReschedule(ctx, ws); ret {
 		return res, fmt.Errorf("handleReschedule: %w", err)
-	}
-
-	// We only release the lease if everything went well, this allows us to re-use any cached data we
-	// may have accrued during reconciliation
-	if res, err, ret := r.releaseLease(ctx, ws); ret {
-		return res, fmt.Errorf("release lease: %w", err)
 	}
 
 	log.V(DebugLevel).Info("reconcile completed")
