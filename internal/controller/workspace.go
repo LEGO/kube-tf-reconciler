@@ -1018,8 +1018,10 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 		return ctrl.Result{}, fmt.Errorf("unexpected failure when setting owner reference"), true
 	}
 
-	// We try to create the lease,
-	createErr := r.Client.Create(ctx, &ownedLease)
+	// We try to create the lease
+	createErr := retry.OnError(retry.DefaultRetry, apierrors.IsAlreadyExists, func() error {
+		return r.Client.Create(ctx, &ownedLease)
+	})
 
 	var lease coordinationv1.Lease
 	err = retry.OnError(retry.DefaultRetry, apierrors.IsNotFound, func() error {
