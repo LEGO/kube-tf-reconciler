@@ -1032,6 +1032,7 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 		if err != nil {
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("failed to takeover lease: %w", err), true
 		}
+		lease = ownedLease
 	}
 
 	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
