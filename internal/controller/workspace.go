@@ -993,7 +993,7 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 	// the pod name.
 	holderIdentity, err := os.Hostname()
 	if err != nil {
-		return ctrl.Result{}, err, true
+		return ctrl.Result{}, fmt.Errorf("unexpected failure when getting hostname: %w", err), true
 	}
 
 	leaseDurationSeconds := 300
@@ -1013,7 +1013,7 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 
 	err = controllerutil.SetOwnerReference(ws, &ownedLease, r.Scheme)
 	if err != nil {
-		return ctrl.Result{}, err, true
+		return ctrl.Result{}, fmt.Errorf("unexpected failure when setting owner reference"), true
 	}
 
 	// We try to create the lease, we don't do any error checking here as we will check again right after
@@ -1079,7 +1079,9 @@ func (r *WorkspaceReconciler) refreshLeases(ctx context.Context) {
 		r.leases.Range(func(key, value interface{}) bool {
 			lease := value.(coordinationv1.Lease)
 
-			err := r.Client.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, &lease)
+			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				return r.Client.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, &lease)
+			})
 			if err != nil {
 				slog.ErrorContext(ctx, "failed to get lease for refresh", "lease", lease.Name, "namespace", lease.Namespace, "error", err)
 				return true
@@ -1087,7 +1089,10 @@ func (r *WorkspaceReconciler) refreshLeases(ctx context.Context) {
 
 			now := metav1.NewMicroTime(time.Now())
 			lease.Spec.RenewTime = &now
-			err = r.Client.Update(ctx, &lease)
+
+			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				return r.Client.Update(ctx, &lease)
+			})
 			if err != nil {
 				slog.ErrorContext(ctx, "failed to refresh lease", "lease", lease.Name, "namespace", lease.Namespace, "error", err)
 				return true
