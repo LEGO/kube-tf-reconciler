@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -1029,7 +1028,8 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 	})
 	if err != nil {
 		// Failed to get lease, this is unexpected so let's try again soon after
-		return ctrl.Result{RequeueAfter: time.Duration(rand.Int()%10+10) * time.Second}, errors.Join(errors.New("failed to get lease"), createErr, err), true
+		slog.ErrorContext(ctx, "failed to get lease after creation attempt", "lease", ownedLease.Name, "namespace", ownedLease.Namespace, "error", err, "createError", createErr)
+		return ctrl.Result{RequeueAfter: time.Duration(rand.Int()%10+10) * time.Second}, nil, true
 	}
 
 	if lease.Spec.RenewTime.Time.Add(time.Duration(leaseDurationSeconds) * time.Second).Before(time.Now()) {
@@ -1039,7 +1039,8 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 		// Verify that create is successful, if it is it means we took over the lease
 		err = r.Client.Create(ctx, &ownedLease)
 		if err != nil {
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, fmt.Errorf("failed to takeover lease: %w", err), true
+			slog.ErrorContext(ctx, "failed to takeover lease, another instance may have taken it", "lease", lease.Name, "namespace", lease.Namespace, "error", err)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
 		}
 		lease = ownedLease
 	}
