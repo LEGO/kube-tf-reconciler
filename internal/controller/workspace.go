@@ -1032,7 +1032,7 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 		return ctrl.Result{RequeueAfter: time.Duration(rand.Int()%10+10) * time.Second}, nil, true
 	}
 
-	expiresAt := lease.Spec.RenewTime.Add(time.Duration(ptr.Deref(lease.Spec.LeaseDurationSeconds, 0)))
+	expiresAt := lease.Spec.RenewTime.Add(time.Duration(ptr.Deref(lease.Spec.LeaseDurationSeconds, 0)) * time.Second)
 	if expiresAt.Before(renewTime.Time) {
 		// Expired, try and take over.
 		// We do this by doing a delete + create. We ignore the delete error as it might have been deleted already.
