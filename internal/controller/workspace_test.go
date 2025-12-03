@@ -480,7 +480,7 @@ resource "random_pet" "name" {
 	lockedWs := newWs("test-locked", modHost.ModuleSource("my-module"))
 	expiredWs := newWs("test-expired", modHost.ModuleSource("my-module"))
 	now := metav1.NewMicroTime(time.Now())
-	past := metav1.NewMicroTime(now.Add(-10 * time.Minute))
+	past := metav1.NewMicroTime(now.Add(-5 * time.Minute))
 	otherLease := &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      leaseName(lockedWs),

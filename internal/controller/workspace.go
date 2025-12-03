@@ -90,9 +90,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 	defer func() {
-		// We only release the lease if everything went well, this allows us to re-use any cached data we
-		// may have accrued during reconciliation
-		if _, err, ret := r.releaseLease(ctx, ws); ret {
+		// Release lease on a separate context to ensure it always happens
+		if _, err, ret := r.releaseLease(context.Background(), ws); ret {
 			slog.ErrorContext(ctx, "failed to release lease", "workspace", req.String(), "error", err)
 		}
 	}()
@@ -557,8 +556,8 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 		return ctrl.Result{}, nil, false
 	}
 
-	log.V(DebugLevel).Info("reshedule starting")
-	defer log.V(DebugLevel).Info("reshedule completed")
+	log.V(DebugLevel).Info("reschedule starting")
+	defer log.V(DebugLevel).Info("reschedule completed")
 
 	old := ws.DeepCopy()
 
@@ -999,7 +998,7 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 
 	leaseDurationSeconds := 300
 	renewTime := metav1.NewMicroTime(time.Now())
-	ownedLease := coordinationv1.Lease{
+	newLease := coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      leaseName(ws),
 			Namespace: ws.Namespace,
@@ -1012,43 +1011,44 @@ func (r *WorkspaceReconciler) acquireLease(ctx context.Context, ws *tfv1alphav1.
 		},
 	}
 
-	err = controllerutil.SetOwnerReference(ws, &ownedLease, r.Scheme)
+	err = controllerutil.SetOwnerReference(ws, &newLease, r.Scheme)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("unexpected failure when setting owner reference"), true
 	}
 
 	// We try to create the lease
 	createErr := retry.OnError(retry.DefaultRetry, apierrors.IsAlreadyExists, func() error {
-		return r.Client.Create(ctx, &ownedLease)
+		ownedLease := newLease.DeepCopy()
+		return r.Client.Create(ctx, ownedLease)
 	})
 
 	var lease coordinationv1.Lease
 	err = retry.OnError(retry.DefaultRetry, apierrors.IsNotFound, func() error {
-		return r.Client.Get(ctx, types.NamespacedName{Namespace: ownedLease.Namespace, Name: ownedLease.Name}, &lease)
+		return r.Client.Get(ctx, types.NamespacedName{Namespace: newLease.Namespace, Name: newLease.Name}, &lease)
 	})
 	if err != nil {
 		// Failed to get lease, this is unexpected so let's try again soon after
-		slog.ErrorContext(ctx, "failed to get lease after creation attempt", "lease", ownedLease.Name, "namespace", ownedLease.Namespace, "error", err, "createError", createErr)
+		slog.ErrorContext(ctx, "failed to get lease after creation attempt", "lease", newLease.Name, "namespace", newLease.Namespace, "error", err, "createError", createErr)
 		return ctrl.Result{RequeueAfter: time.Duration(rand.Int()%10+10) * time.Second}, nil, true
 	}
 
-	if lease.Spec.RenewTime.Time.Add(time.Duration(leaseDurationSeconds) * time.Second).Before(time.Now()) {
+	expiresAt := lease.Spec.RenewTime.Add(time.Duration(ptr.Deref(lease.Spec.LeaseDurationSeconds, 0)))
+	if expiresAt.Before(renewTime.Time) {
 		// Expired, try and take over.
 		// We do this by doing a delete + create. We ignore the delete error as it might have been deleted already.
 		_ = r.Client.Delete(ctx, &lease)
 		// Verify that create is successful, if it is it means we took over the lease
-		err = r.Client.Create(ctx, &ownedLease)
+		err = r.Client.Create(ctx, &newLease)
 		if err != nil {
-			slog.ErrorContext(ctx, "failed to takeover lease, another instance may have taken it", "lease", lease.Name, "namespace", lease.Namespace, "error", err)
+			slog.WarnContext(ctx, "failed to takeover lease, another instance may have taken it", "lease", lease.Name, "namespace", lease.Namespace, "error", err)
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
 		}
-		lease = ownedLease
+		lease = newLease
 	}
 
 	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
 		// Not ours, assume someone else handles refresh of this workspace and push next check into the future
-		expiresAt := lease.Spec.RenewTime.Add(time.Duration(ptr.Deref(lease.Spec.LeaseDurationSeconds, 0)))
-		return ctrl.Result{RequeueAfter: time.Duration(rand.Int()%20) + expiresAt.Sub(time.Now())}, nil, true
+		return ctrl.Result{RequeueAfter: time.Duration(rand.Int()%20)*time.Second + expiresAt.Sub(renewTime.Time)}, nil, true
 	}
 
 	// We got the lease! We can go crazy
