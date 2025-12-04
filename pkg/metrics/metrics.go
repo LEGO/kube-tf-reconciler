@@ -38,6 +38,7 @@ func init() {
 	metrics.Registry.MustRegister(
 		WorkspacePhase,
 		WorkspaceReconciliations,
+		WorkspacePhaseTimestamp,
 	)
 }
 
