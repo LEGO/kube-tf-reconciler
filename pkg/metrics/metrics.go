@@ -32,9 +32,6 @@ var (
 )
 
 func init() {
-	metrics.Registry.Unregister(WorkspacePhase)
-	metrics.Registry.Unregister(WorkspaceReconciliations)
-
 	metrics.Registry.MustRegister(
 		WorkspacePhase,
 		WorkspaceReconciliations,
