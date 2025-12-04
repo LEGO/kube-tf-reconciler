@@ -14,6 +14,14 @@ var (
 		[]string{"namespace", "workspace", "phase"},
 	)
 
+	WorkspacePhaseTimestamp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kube_tf_workspace_phase_timestamp",
+			Help: "Unix timestamp when this phase was set, used because multiple pods can work on the same workspace",
+		},
+		[]string{"namespace", "workspace", "phase"},
+	)
+
 	WorkspaceReconciliations = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "kube_tf_workspace_reconciliations_total",
@@ -24,6 +32,9 @@ var (
 )
 
 func init() {
+	metrics.Registry.Unregister(WorkspacePhase)
+	metrics.Registry.Unregister(WorkspaceReconciliations)
+
 	metrics.Registry.MustRegister(
 		WorkspacePhase,
 		WorkspaceReconciliations,
@@ -36,8 +47,14 @@ func SetWorkspacePhase(namespace, workspace, phase string) {
 		"workspace": workspace,
 	})
 
+	WorkspacePhaseTimestamp.DeletePartialMatch(prometheus.Labels{
+		"namespace": namespace,
+		"workspace": workspace,
+	})
+
 	if phase != "" {
 		WorkspacePhase.WithLabelValues(namespace, workspace, phase).Set(1)
+		WorkspacePhaseTimestamp.WithLabelValues(namespace, workspace, phase).SetToCurrentTime()
 	}
 }
 
