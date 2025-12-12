@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 const (
@@ -188,16 +189,18 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 		}
 	})
 	if err != nil {
-		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to init terraform: %v", err)
-		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to init terraform: %v", err), nil)
+		err = fmt.Errorf("terraform init failed: %w", err)
+		r.Recorder.Event(ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, err.Error(), nil)
 		return ctrl.Result{}, err, true
 	}
 
 	valResult, err := tf.Validate(ctx)
 	if err != nil {
 		log.Error(err, "failed to validate terraform", "workspace", ws.Name)
-		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to validate terraform: %v", err)
-		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to validate terraform: %v", err), nil)
+		err = fmt.Errorf("terraform validate failed: %w", err)
+		r.Recorder.Event(ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, err.Error(), nil)
 		return ctrl.Result{}, err, true
 	}
 
@@ -597,6 +600,7 @@ func (r *WorkspaceReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Man
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&tfv1alphav1.Workspace{}).
+		WithEventFilter(predicate.Or(predicate.GenerationChangedPredicate{}, predicate.LabelChangedPredicate{}, predicate.AnnotationChangedPredicate{})).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 5}). // Match terraform execution capacity
 		Complete(r)
 }
