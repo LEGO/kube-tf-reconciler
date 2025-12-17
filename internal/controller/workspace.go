@@ -1103,9 +1103,8 @@ func (r *WorkspaceReconciler) refreshLeases(ctx context.Context) {
 }
 
 func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.Workspace, update func(ws *tfv1alphav1.Workspace, output string)) (chan<- string, *sync.WaitGroup) {
-	planOutputCh := make(chan string, 512)
+	outputCh := make(chan string, 512)
 	wg := &sync.WaitGroup{}
-	wg.Add(1)
 	wg.Go(func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -1135,7 +1134,7 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 
 		for {
 			select {
-			case o, ok := <-planOutputCh:
+			case o, ok := <-outputCh:
 				output = o
 				if !ok {
 					return
@@ -1148,5 +1147,5 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 		}
 	})
 
-	return planOutputCh, wg
+	return outputCh, wg
 }
