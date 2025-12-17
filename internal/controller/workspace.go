@@ -318,23 +318,50 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 
 	_ = r.updateWorkspaceStatus(ctx, ws, TFPhasePlanning, "Starting terraform plan", nil)
 
-	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, false, func(stdout, stderr string) {
+	planOutputCh := make(chan string, 512)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		output := ""
 
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
-				return err
+		updateOutput := func(output string) {
+			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+					return err
+				}
+
+				old := ws.DeepCopy()
+				ws.Status.LastPlanOutput = output
+
+				return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+			})
+
+			if err != nil {
+				_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace plan output: %v", err), nil)
+				return
 			}
-
-			old := ws.DeepCopy()
-			ws.Status.LastPlanOutput, _ = constructOutput(stdout, stderr, nil)
-
-			return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
-		})
-
-		if err != nil {
-			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace plan output: %v", err), nil)
-			return
 		}
+
+		for {
+			select {
+			case planOutput, ok := <-planOutputCh:
+				output = planOutput
+				if !ok {
+					updateOutput(output)
+					return
+				}
+			case <-ctx.Done():
+				updateOutput(output)
+				return
+			case <-ticker.C:
+				updateOutput(output)
+			}
+		}
+	}()
+
+	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, false, func(stdout, stderr string) {
+		output, _ := constructOutput(stdout, stderr, nil)
+		planOutputCh <- output
 	})
 
 	if err != nil {
@@ -412,22 +439,50 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 	if ws.Status.HasChanges {
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseApplying, "Applying terraform changes", nil)
 
-		applyOutput, err := r.executeTerraformApply(ctx, tf, false, func(stdout, stderr string) {
-			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
-					return err
+		applyOutputCh := make(chan string, 512)
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			output := ""
+
+			updateOutput := func(output string) {
+				err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+					if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+						return err
+					}
+
+					old := ws.DeepCopy()
+					ws.Status.LastApplyOutput = output
+
+					return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+				})
+
+				if err != nil {
+					_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace apply output: %v", err), nil)
+					return
 				}
-
-				old := ws.DeepCopy()
-				ws.Status.LastApplyOutput, _ = constructOutput(stdout, stderr, nil)
-
-				return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
-			})
-
-			if err != nil {
-				_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to update workspace plan output: %v", err), nil)
-				return
 			}
+
+			for {
+				select {
+				case applyOutput, ok := <-applyOutputCh:
+					output = applyOutput
+					if !ok {
+						updateOutput(output)
+						return
+					}
+				case <-ctx.Done():
+					updateOutput(output)
+					return
+				case <-ticker.C:
+					updateOutput(output)
+				}
+			}
+		}()
+
+		applyOutput, err := r.executeTerraformApply(ctx, tf, false, func(stdout, stderr string) {
+			output, _ := constructOutput(stdout, stderr, nil)
+			applyOutputCh <- output
 		})
 		if err != nil {
 			log.Error(err, "failed to apply terraform", "workspace", ws.Name)
