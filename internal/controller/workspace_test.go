@@ -306,7 +306,7 @@ resource "random_pet" "name" {
 		assert.NoError(t, err)
 
 		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
-		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to init terraform")
+		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to download module")
 		assert.NotNil(t, ws.Status.LastErrorTime)
 		assert.Equal(t, ws.Status.TerraformMessage, ws.Status.LastErrorMessage)
 	})
