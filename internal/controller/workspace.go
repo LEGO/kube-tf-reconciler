@@ -1135,10 +1135,10 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 		for {
 			select {
 			case o, ok := <-outputCh:
-				output = o
 				if !ok {
 					return
 				}
+				output = o
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
