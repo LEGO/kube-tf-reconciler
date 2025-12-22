@@ -11,7 +11,7 @@ require (
 	github.com/hashicorp/terraform-json v0.27.2
 	github.com/lukaspj/go-fang v0.0.0-20250923090258-d4090bcaecc7
 	github.com/prometheus/client_golang v1.22.0
-	github.com/spf13/cobra v1.10.1
+	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	github.com/zclconf/go-cty v1.17.0
 	k8s.io/api v0.34.2
