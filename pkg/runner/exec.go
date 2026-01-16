@@ -74,7 +74,11 @@ func New(rootDir string) *Exec {
 
 func (e *Exec) SetupWorkspace(ws *tfreconcilev1alpha1.Workspace) (string, error) {
 	fullPath := filepath.Join(e.WorkspacesDir, ws.Namespace, ws.Name)
-	err := os.MkdirAll(fullPath, 0755)
+	err := os.RemoveAll(fullPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to clear workspace dir: %w", err)
+	}
+	err = os.MkdirAll(fullPath, 0755)
 	if err != nil {
 		return "", fmt.Errorf("failed to create workspace dir: %w", err)
 	}
