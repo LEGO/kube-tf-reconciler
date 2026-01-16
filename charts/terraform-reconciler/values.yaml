@@ -5,7 +5,7 @@ openshift: false
 
 image:
   repository: ghcr.io/lego/kube-tf-reconciler/kube-tf-reconciler
-  tag: sha-4e5552f
+  tag: sha-a35b908
   pullPolicy: IfNotPresent
 
 deployment:
