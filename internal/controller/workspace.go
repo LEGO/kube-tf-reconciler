@@ -464,6 +464,13 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 	defer log.V(DebugLevel).Info("setup terraform completed")
 	log.V(DebugLevel).Info("setup terraform starting")
 
+	err := r.Tf.SetupWorkspace(ws)
+	if err != nil {
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to setup workspace: %v", err)
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to setup workspace: %v", err), nil)
+		return ctrl.Result{}, err, true, nil
+	}
+
 	envs, err := r.getEnvsForExecution(ctx, ws)
 	if err != nil {
 		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to get envs for execution: %v", err)
@@ -833,10 +840,7 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 		}
 
 		if ws.Spec.Authentication.Tokens != nil {
-			wsPath, err := r.Tf.SetupWorkspace(ws)
-			if err != nil {
-				return nil, fmt.Errorf("failed to setup workspace for token files: %w", err)
-			}
+			wsPath := r.Tf.GetWorkspacePath(ws)
 			for _, token := range ws.Spec.Authentication.Tokens {
 				value, err := r.getSecretFromRef(ctx, ws, &token.SecretKeyRef)
 				if err != nil {
@@ -881,10 +885,7 @@ func (r *WorkspaceReconciler) setupAWSAuthentication(ctx context.Context, ws *tf
 		return "", fmt.Errorf("failed to create token for service account %s: %w",
 			ws.Spec.Authentication.AWS.ServiceAccountName, err)
 	}
-	wsPath, err := r.Tf.SetupWorkspace(ws)
-	if err != nil {
-		return "", fmt.Errorf("failed to setup workspace for aws token file: %w", err)
-	}
+	wsPath := r.Tf.GetWorkspacePath(ws)
 
 	path := filepath.Join(wsPath, "aws-token")
 	err = os.WriteFile(path, []byte(tokenRequest.Status.Token), 0600)
