@@ -61,6 +61,10 @@ func CleanupWorkspaceMetrics(namespace, workspace string) {
 		"namespace": namespace,
 		"workspace": workspace,
 	})
+	WorkspacePhaseTimestamp.DeletePartialMatch(prometheus.Labels{
+		"namespace": namespace,
+		"workspace": workspace,
+	})
 }
 
 func RecordReconciliation(namespace, workspace string) {
