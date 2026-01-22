@@ -53,11 +53,12 @@ const (
 	TFValidateEventReason = "TerraformValidate"
 
 	// Terraform execution phases
-	TFPhaseIdle      = ""
-	TFPhasePlanning  = "Planning"
-	TFPhaseApplying  = "Applying"
-	TFPhaseCompleted = "Completed"
-	TFPhaseErrored   = "Errored"
+	TFPhaseIdle         = ""
+	TFPhaseInitializing = "Initializing"
+	TFPhasePlanning     = "Planning"
+	TFPhaseApplying     = "Applying"
+	TFPhaseCompleted    = "Completed"
+	TFPhaseErrored      = "Errored"
 )
 
 // WorkspaceReconciler reconciles a Workspace object
@@ -170,6 +171,8 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfv1alpha
 func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
+	_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseInitializing, "Initializing Terraform workspace", nil)
+
 	log.V(DebugLevel).Info("refresh dependencies starting")
 	defer log.V(DebugLevel).Info("refresh dependencies completed")
 
@@ -215,6 +218,10 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	})
 
 	if err != nil {
+		log.Error(err, "failed to get workspace object from Kubernetes API", "workspace", ws.Name)
+		err = fmt.Errorf("terraform initialize failed: %w", err)
+		r.Recorder.Event(ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, err.Error(), nil)
 		return ctrl.Result{}, err, true
 	}
 
@@ -240,6 +247,7 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 
 	if isDeleting {
 		log.V(DebugLevel).Info("workspace is being deleted, skipping unchanged checks")
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "workspace is being deleted, skipping unchanged checks", nil)
 		return ctrl.Result{}, nil, false
 	}
 
