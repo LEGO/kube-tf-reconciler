@@ -171,7 +171,14 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfv1alpha
 func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
-	_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseInitializing, "Initializing Terraform workspace", nil)
+	_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseInitializing, "Initializing Terraform workspace", func(s *tfv1alphav1.WorkspaceStatus) {
+		// Reset all debug information
+		s.LastErrorTime = nil
+		s.LastErrorMessage = ""
+		s.LastPlanOutput = ""
+		s.LastApplyOutput = ""
+		s.InitOutput = ""
+	})
 
 	log.V(DebugLevel).Info("refresh dependencies starting")
 	defer log.V(DebugLevel).Info("refresh dependencies completed")
@@ -364,9 +371,6 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		s.HasChanges = changed
 		s.NewPlanNeeded = false
 		s.NewApplyNeeded = true
-		if !changed {
-			s.LastPlanOutput = ""
-		}
 		s.CurrentPlan = &tfv1alphav1.PlanReference{
 			Name:      plan.Name,
 			Namespace: plan.Namespace,
