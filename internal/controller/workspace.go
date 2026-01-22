@@ -84,6 +84,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
+	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
+		slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
+		return ctrl.Result{RequeueAfter: ws.Status.Backoff.NextRetryTime.Sub(time.Now())}, nil
+	}
+
 	// Attempt to acquire lease, if we don't get it, then we don't proceed
 	if res, err, ret := r.acquireLease(ctx, ws); ret {
 		if err != nil {
@@ -109,31 +114,66 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	res, err, ret, tf := r.setupTerraformForWorkspace(ctx, ws)
 	if ret {
-		return res, fmt.Errorf("setupTerraformForWorkspace: %w", err)
+		if err != nil {
+			err = fmt.Errorf("setupTerraformForWorkspace: %w", err)
+			r.backoff(ctx, ws)
+		}
+
+		return res, err
 	}
 
 	if res, err, ret = r.handleRendering(ctx, ws); ret {
-		return res, fmt.Errorf("handleRendering: %w", err)
+		if err != nil {
+			err = fmt.Errorf("handleRendering: %w", err)
+			r.backoff(ctx, ws)
+		}
+
+		return res, err
 	}
 
 	if res, err, ret = r.handleRefreshDependencies(ctx, ws, tf); ret {
-		return res, fmt.Errorf("handleRefreshDependencies: %w", err)
+		if err != nil {
+			err = fmt.Errorf("handleRefreshDependencies: %w", err)
+			r.backoff(ctx, ws)
+		}
+
+		return res, err
 	}
 
 	if res, err, ret = r.handleDeletionAndFinalizers(ctx, ws, tf); ret {
-		return res, fmt.Errorf("handleDeletionAndFinalizers: %w", err)
+		if err != nil {
+			err = fmt.Errorf("handleDeletionAndFinalizers: %w", err)
+			r.backoff(ctx, ws)
+		}
+
+		return res, err
 	}
 
 	if res, err, ret = r.handlePlan(ctx, ws, tf); ret {
-		return res, fmt.Errorf("handlePlan: %w", err)
+		if err != nil {
+			err = fmt.Errorf("handlePlan: %w", err)
+			r.backoff(ctx, ws)
+		}
+
+		return res, err
 	}
 
 	if res, err, ret = r.handleApply(ctx, ws, tf); ret {
-		return res, fmt.Errorf("handleApply: %w", err)
+		if err != nil {
+			err = fmt.Errorf("handleApply: %w", err)
+			r.backoff(ctx, ws)
+		}
+
+		return res, err
 	}
 
 	if res, err, ret = r.handleReschedule(ctx, ws); ret {
-		return res, fmt.Errorf("handleReschedule: %w", err)
+		if err != nil {
+			err = fmt.Errorf("handleReschedule: %w", err)
+			r.backoff(ctx, ws)
+		}
+
+		return res, err
 	}
 
 	log.V(DebugLevel).Info("reconcile completed")
@@ -1161,4 +1201,16 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 	})
 
 	return outputCh, wg
+}
+
+func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
+	old := ws.DeepCopy()
+	ws.Status.Backoff.RetryCount++
+	backoff := retry.DefaultBackoff
+	backoff.Steps = int(ws.Status.Backoff.RetryCount)
+	ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoff.Step())}
+	backoffErr := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	if backoffErr != nil {
+		slog.ErrorContext(ctx, "failed to update backoff status", "error", backoffErr.Error())
+	}
 }
