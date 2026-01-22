@@ -706,7 +706,7 @@ func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfv
 	return err
 }
 
-// createPlanRecord creates a Plan CRD as an audit record after terraform execution
+// createPlanRecord creates or updates a Plan CRD as an audit record after terraform execution
 func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alphav1.Workspace, hasChanges bool, planOutput, applyOutput string, phase tfv1alphav1.PlanPhase, destroy bool) (*tfv1alphav1.Plan, error) {
 	planName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
 
@@ -781,6 +781,8 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alph
 			return err
 		}
 
+		old := plan.DeepCopy()
+
 		// Update the status with the latest outputs
 		plan.Status = tfv1alphav1.PlanStatus{
 			Phase:              phase,
@@ -794,7 +796,7 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alph
 			ObservedGeneration: 1,
 		}
 
-		return r.Client.Status().Update(ctx, plan)
+		return r.Client.Status().Patch(ctx, plan, client.MergeFrom(old))
 	})
 
 	if err != nil {
