@@ -371,7 +371,6 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		s.HasChanges = changed
 		s.NewPlanNeeded = false
 		s.NewApplyNeeded = true
-		s.LastPlanOutput = ""
 		s.CurrentPlan = &tfv1alphav1.PlanReference{
 			Name:      plan.Name,
 			Namespace: plan.Namespace,

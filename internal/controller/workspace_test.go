@@ -138,6 +138,7 @@ resource "random_pet" "name" {
 		require.Len(t, plans.Items, 1)
 		relevantPlan := plans.Items[0]
 		assert.Equal(t, tfv1alphav1.PlanPhaseApplied, relevantPlan.Status.Phase)
+		assert.NotEmpty(t, relevantPlan.Status.PlanOutput)
 		assert.NotEmpty(t, relevantPlan.Status.ApplyOutput)
 
 		assert.Len(t, reasons, 3)
