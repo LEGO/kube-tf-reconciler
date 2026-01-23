@@ -187,6 +187,11 @@ type WorkspaceSpec struct {
 	PlanHistoryLimit int32 `json:"planHistoryLimit,omitempty"`
 }
 
+type BackoffStatus struct {
+	NextRetryTime *metav1.Time `json:"nextRetryTime,omitempty"`
+	RetryCount    int32        `json:"retryCount,omitempty"`
+}
+
 // WorkspaceStatus defines the observed state of Workspace.
 type WorkspaceStatus struct {
 	// CurrentPlan is a reference to the current Plan resource
@@ -197,6 +202,9 @@ type WorkspaceStatus struct {
 	// ValidRender is the result of the validation of the workspace
 	// +kubebuilder:validation:Optional
 	ValidRender bool `json:"validRender"`
+	// Backoff is a status to control how often we retry running failed plans
+	// +kubebuilder:validation:Optional
+	Backoff BackoffStatus `json:"backoff"`
 
 	// InitOutput is the result of initialising dependencies in the workspace
 	// +kubebuilder:validation:Optional

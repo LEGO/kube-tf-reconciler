@@ -265,6 +265,17 @@ spec:
           status:
             description: WorkspaceStatus defines the observed state of Workspace.
             properties:
+              backoff:
+                description: Backoff is a status to control how often we retry running
+                  failed plans
+                properties:
+                  nextRetryTime:
+                    format: date-time
+                    type: string
+                  retryCount:
+                    format: int32
+                    type: integer
+                type: object
               currentContentHash:
                 description: |-
                   CurrentContentHash is a hash of the .terraform directory content, used to detect
