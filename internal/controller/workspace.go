@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -86,7 +87,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
 		slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
-		return ctrl.Result{RequeueAfter: ws.Status.Backoff.NextRetryTime.Sub(time.Now())}, nil
+		return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
 	}
 
 	// Attempt to acquire lease, if we don't get it, then we don't proceed
@@ -1206,9 +1207,10 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
 	old := ws.DeepCopy()
 	ws.Status.Backoff.RetryCount++
-	backoff := retry.DefaultBackoff
-	backoff.Steps = int(ws.Status.Backoff.RetryCount)
-	ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoff.Step())}
+	// 1 minute, 2 minutes, 4, 8 ,16
+	backoff := math.Pow(2, float64(ws.Status.Backoff.RetryCount)) * 30
+	backoffDuration := time.Duration(math.Max(backoff, 20*60)) * time.Second
+	ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoffDuration)}
 	backoffErr := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	if backoffErr != nil {
 		slog.ErrorContext(ctx, "failed to update backoff status", "error", backoffErr.Error())
