@@ -358,6 +358,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 			s.HasChanges = false
 			s.LastExecutionTime = &now
 			s.LastPlanOutput = ""
+			s.Backoff.RetryCount = 0
 		})
 		if err != nil {
 			return ctrl.Result{}, err, true
@@ -396,6 +397,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 			s.HasChanges = false
 			s.LastExecutionTime = &now
 			s.LastPlanOutput = ""
+			s.Backoff.RetryCount = 0
 		})
 		if err != nil {
 			return ctrl.Result{}, err, true
@@ -443,6 +445,7 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 		err := r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Apply skipped, no Auto-apply enabled", func(s *tfv1alphav1.WorkspaceStatus) {
 			s.LastExecutionTime = &now
 			s.NewApplyNeeded = false
+			s.Backoff.RetryCount = 0
 		})
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update workspace status after skipping apply: %w", err), true
@@ -486,6 +489,7 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 		err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Apply completed successfully", func(s *tfv1alphav1.WorkspaceStatus) {
 			s.LastExecutionTime = &now
 			s.LastApplyOutput = applyOutput
+			s.Backoff.RetryCount = 0
 		})
 
 		if ws.ManualApplyRequested() {
@@ -1208,11 +1212,10 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 
 func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
 	old := ws.DeepCopy()
-	ws.Status.Backoff.RetryCount++
-	// 1 minute, 2 minutes, 4, 8 ,16
 	backoff := math.Pow(2, float64(ws.Status.Backoff.RetryCount)) * 30
 	backoffDuration := time.Duration(math.Max(backoff, 20*60)) * time.Second
 	ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoffDuration)}
+	ws.Status.Backoff.RetryCount++
 	backoffErr := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	if backoffErr != nil {
 		slog.ErrorContext(ctx, "failed to update backoff status", "error", backoffErr.Error())
