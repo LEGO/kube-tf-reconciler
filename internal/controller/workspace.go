@@ -1213,7 +1213,7 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
 	old := ws.DeepCopy()
 	backoff := math.Pow(2, float64(ws.Status.Backoff.RetryCount)) * 30
-	backoffDuration := time.Duration(math.Max(backoff, 20*60)) * time.Second
+	backoffDuration := time.Duration(math.Min(backoff, 20*60)) * time.Second
 	ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoffDuration)}
 	ws.Status.Backoff.RetryCount++
 	backoffErr := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
