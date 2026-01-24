@@ -129,7 +129,7 @@ func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) 
 	// Not installed or missing — do the install
 	installer := &releases.ExactVersion{
 		Product:    product.Terraform,
-		InstallDir: e.installDir,
+		InstallDir: filepath.Join(e.installDir, terraformVersion),
 		Version:    version.Must(version.NewVersion(terraformVersion)),
 	}
 	installer.Timeout = 2 * time.Minute
