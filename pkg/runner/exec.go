@@ -126,10 +126,16 @@ func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) 
 		delete(e.terraformInstalledVersions, terraformVersion)
 	}
 
+	installDir := filepath.Join(e.installDir, terraformVersion)
+	err := os.MkdirAll(e.installDir, 0755)
+	if err != nil {
+		return "", fmt.Errorf("failed to create install dir: %w", err)
+	}
+
 	// Not installed or missing — do the install
 	installer := &releases.ExactVersion{
 		Product:    product.Terraform,
-		InstallDir: filepath.Join(e.installDir, terraformVersion),
+		InstallDir: installDir,
 		Version:    version.Must(version.NewVersion(terraformVersion)),
 	}
 	installer.Timeout = 2 * time.Minute
