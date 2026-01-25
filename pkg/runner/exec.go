@@ -127,7 +127,7 @@ func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) 
 	}
 
 	installDir := filepath.Join(e.installDir, terraformVersion)
-	err := os.MkdirAll(e.installDir, 0755)
+	err := os.MkdirAll(installDir, 0755)
 	if err != nil {
 		return "", fmt.Errorf("failed to create install dir: %w", err)
 	}
