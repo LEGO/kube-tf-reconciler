@@ -231,7 +231,7 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	err := r.Tf.TerraformInit(ctx, tf, func(stdout, stderr string) {
 		output, _ := constructOutput(stdout, stderr, nil)
 		initOutputCh <- output
-	})
+	}, tfexec.Upgrade(true))
 
 	close(initOutputCh)
 	wg.Wait()
