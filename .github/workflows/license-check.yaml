@@ -47,7 +47,6 @@ jobs:
         with:
           comment-summary-in-pr: always
           fail-on-severity: moderate
-          allow-dependencies-licenses: "pkg:golang/github.com/hashicorp/terraform-json"
           allow-licenses:
             BSD-2-Clause-Patent,
             ADSL,
