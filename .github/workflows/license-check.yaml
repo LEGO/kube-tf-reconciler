@@ -114,6 +114,7 @@ jobs:
             Libpng,
             libtiff,
             LPPL-1.3c,
+            LicenseRef-scancode-google-patent-license-golang,
             MIT-0,
             MIT-advertising,
             MIT-CMU,
