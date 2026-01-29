@@ -105,13 +105,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}()
 
-	// Record reconciliation attempt
-	metrics.RecordReconciliation(ws.Namespace, ws.Name)
-
 	logf.IntoContext(ctx, log.WithValues("workspace", req.String()))
 	if ws.Status.ObservedGeneration == ws.Generation && time.Now().Before(ws.Status.NextRefreshTimestamp.Time) && !ws.ManualApplyRequested() {
 		return ctrl.Result{RequeueAfter: time.Until(ws.Status.NextRefreshTimestamp.Time)}, nil
 	}
+
+	// Record reconciliation attempt
+	metrics.RecordReconciliation(ws.Namespace, ws.Name)
 
 	res, err, ret, tf := r.setupTerraformForWorkspace(ctx, ws)
 	if ret {
