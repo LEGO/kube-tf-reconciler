@@ -307,7 +307,7 @@ func TestWorkspaceController(t *testing.T) {
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsTerraformMessage("Auto-destroy enabled is disabled, awaiting manual destroy")), wait.WithContext(ctx))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsTerraformMessage("Auto-destroy is disabled, awaiting manual destroy")), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
 
