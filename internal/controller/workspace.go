@@ -437,7 +437,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
-	// Don't plan deleted workspaces
+	// Don't apply deleted workspaces
 	if !ws.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil, false
 	}
