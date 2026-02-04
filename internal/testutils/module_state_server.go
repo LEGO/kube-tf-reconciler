@@ -30,6 +30,7 @@ func NewModuleStateServer(t *testing.T) *ModuleStateServer {
 		name := r.URL.Query().Get("name")
 		if name == "" {
 			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 		srv.events[name] = append(srv.events[name], ModuleEventApply)
 		slog.Info("created module", "module", name)
@@ -39,6 +40,7 @@ func NewModuleStateServer(t *testing.T) *ModuleStateServer {
 		name := r.URL.Query().Get("name")
 		if name == "" {
 			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 		srv.events[name] = append(srv.events[name], ModuleEventDestroy)
 		slog.Info("destroyed module", "module", name)
