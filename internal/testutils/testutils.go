@@ -218,6 +218,16 @@ func WsCurrentGeneration(object k8s.Object) bool {
 	return workspace.Generation == workspace.Status.ObservedGeneration
 }
 
+func WsTerraformMessage(message string) func(object k8s.Object) bool {
+	return func(object k8s.Object) bool {
+		workspace, ok := object.(*tfreconcilev1alpha1.Workspace)
+		if !ok {
+			return false
+		}
+		return workspace.Status.TerraformMessage == message
+	}
+}
+
 func EventOwnedBy(name string) resources.ListOption {
 	return resources.WithFieldSelector(fmt.Sprintf("involvedObject.name=%s", name))
 }

@@ -347,6 +347,11 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
+	// Don't plan deleted workspaces
+	if !ws.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil, false
+	}
+
 	if ws.ManualApplyRequested() {
 		log.V(DebugLevel).Info("manual apply requested, proceeding with existing plan")
 		return ctrl.Result{}, nil, false
@@ -431,6 +436,11 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 
 func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
+
+	// Don't plan deleted workspaces
+	if !ws.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil, false
+	}
 
 	if !ws.Status.NewApplyNeeded && !ws.ManualApplyRequested() {
 		return ctrl.Result{}, nil, false
@@ -581,7 +591,7 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 	if ws.Spec.Destroy == tfv1alphav1.DestroyBehaviourManual && !ws.ManualDestroyRequested() {
 		now := metav1.Now()
 		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "Auto-destroy is disabled, awaiting manual destroy")
-		err := r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Destroy skipped, no auto-destroy enabled", func(s *tfv1alphav1.WorkspaceStatus) {
+		err := r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Auto-destroy enabled is disabled, awaiting manual destroy", func(s *tfv1alphav1.WorkspaceStatus) {
 			s.LastExecutionTime = &now
 			s.NewApplyNeeded = false
 			s.Backoff.RetryCount = 0

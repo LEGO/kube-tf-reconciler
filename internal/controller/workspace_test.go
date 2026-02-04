@@ -79,17 +79,11 @@ func TestWorkspaceController(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	localModule := `variable "pet_name_length" {
-  default = 2
-  type    = number
-}
-
-resource "random_pet" "name" {
-  length    = var.pet_name_length
-  separator = "-"
-}
-`
-	modHost.AddFileToModule("my-module", "main.tf", localModule)
+	moduleStateServer := testutils.NewModuleStateServer(t)
+	t.Cleanup(func() {
+		moduleStateServer.Close()
+	})
+	modHost.AddFileToModule("my-module", "main.tf", moduleStateServer.GetModule("my-module"))
 
 	rootDir := t.TempDir() // testutils.TestDataFolder() // Enable to better introspection into test data
 	t.Logf("using root dir: %s", rootDir)
@@ -114,7 +108,7 @@ resource "random_pet" "name" {
 	t.Run("creating the custom resource for the Kind Workspace", func(t *testing.T) {
 		t.Parallel()
 		ws := newWs("test-resource-creation", modHost.ModuleSource("my-module"))
-		ws.Spec.PreventDestroy = false
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
@@ -150,7 +144,7 @@ resource "random_pet" "name" {
 	t.Run("manual apply request", func(t *testing.T) {
 		t.Parallel()
 		ws := newWs("test-resource-manual-apply", modHost.ModuleSource("my-module"))
-		ws.Spec.PreventDestroy = false
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
 		ws.Spec.AutoApply = false
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
@@ -213,7 +207,7 @@ resource "random_pet" "name" {
 		assert.NoError(t, err)
 
 		ws := newWs("test-resource-generic-token", modHost.ModuleSource("my-module"))
-		ws.Spec.PreventDestroy = false
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
 		ws.Spec.AutoApply = false
 		ws.Spec.Authentication = &tfv1alphav1.AuthenticationSpec{
 			Tokens: []tfv1alphav1.TokenAuthConfig{
@@ -239,10 +233,98 @@ resource "random_pet" "name" {
 		assert.FileExists(t, filepath.Join(rootDir, "workspaces", ws.Namespace, ws.Name, "aws-token"))
 	})
 
+	t.Run("skip destroy on deletion", func(t *testing.T) {
+		t.Parallel()
+		modName := "skip-destroy"
+		modHost.AddFileToModule(modName, "main.tf", moduleStateServer.GetModule(modName))
+		ws := newWs("test-skip-destroy", modHost.ModuleSource(modName))
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourSkip
+		ws.Spec.AutoApply = true
+		ws.Spec.Module.Name = modName
+
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		assert.NoError(t, err)
+		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
+
+		plans := &tfv1alphav1.PlanList{}
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Len(t, plans.Items, 1)
+		assert.NoError(t, k.Resources().Delete(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		assert.NoError(t, err)
+		// Not destroyed because we skipped
+		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
+	})
+
+	t.Run("auto destroy on deletion", func(t *testing.T) {
+		t.Parallel()
+		modName := "auto-destroy"
+		modHost.AddFileToModule(modName, "main.tf", moduleStateServer.GetModule(modName))
+		ws := newWs("test-auto-destroy", modHost.ModuleSource(modName))
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
+		ws.Spec.AutoApply = true
+		ws.Spec.Module.Name = modName
+
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		assert.NoError(t, err)
+		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
+
+		plans := &tfv1alphav1.PlanList{}
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Len(t, plans.Items, 1)
+		assert.NoError(t, k.Resources().Delete(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		assert.NoError(t, err)
+		// Auto destroyed
+		assert.Equal(t, testutils.ModuleEventDestroy, moduleStateServer.CurrentStatus(modName))
+	})
+
+	t.Run("await manual destroy on deletion", func(t *testing.T) {
+		t.Parallel()
+		modName := "manual-destroy"
+		modHost.AddFileToModule(modName, "main.tf", moduleStateServer.GetModule(modName))
+		ws := newWs("test-manual-destroy", modHost.ModuleSource(modName))
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourManual
+		ws.Spec.AutoApply = true
+		ws.Spec.Module.Name = modName
+
+		assert.NoError(t, k.Resources().Create(ctx, ws))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		assert.NoError(t, err)
+		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
+
+		plans := &tfv1alphav1.PlanList{}
+		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		assert.NoError(t, err)
+
+		assert.Len(t, plans.Items, 1)
+		assert.NoError(t, k.Resources().Delete(ctx, ws))
+		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsTerraformMessage("Auto-destroy enabled is disabled, awaiting manual destroy")), wait.WithContext(ctx))
+		assert.NoError(t, err)
+		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
+
+		ws.Annotations = map[string]string{
+			tfv1alphav1.ManualDestroyAnnotation: "true",
+		}
+		assert.NoError(t, k.Resources().Update(ctx, ws))
+
+		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		assert.NoError(t, err)
+		assert.Equal(t, testutils.ModuleEventDestroy, moduleStateServer.CurrentStatus(modName))
+	})
+
 	t.Run("cleanup plans on deletion", func(t *testing.T) {
 		t.Parallel()
 		ws := newWs("test-resource-cleanup", modHost.ModuleSource("my-module"))
-		ws.Spec.PreventDestroy = false
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
 		ws.Spec.AutoApply = false
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
@@ -268,7 +350,7 @@ resource "random_pet" "name" {
 		t.Parallel()
 		ws := newWs("test-resource-history-limit-1", modHost.ModuleSource("my-module"))
 		ws.Spec.AutoApply = false
-		ws.Spec.PreventDestroy = false
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
 		ws.Spec.PlanHistoryLimit = 1
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
@@ -294,7 +376,7 @@ resource "random_pet" "name" {
 	t.Run("error message persisted on terraform init failure", func(t *testing.T) {
 		t.Parallel()
 		ws := newWs("test-error-init-failure", "https://invalid-source-that-does-not-exist.com/module")
-		ws.Spec.PreventDestroy = false
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
@@ -320,7 +402,7 @@ resource "random_pet" "name" {
 		modHost.AddFileToModule("invalid-module", "main.tf", invalidModule)
 
 		ws := newWs("test-error-validation-failure", modHost.ModuleSource("invalid-module"))
-		ws.Spec.PreventDestroy = false
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
@@ -351,7 +433,7 @@ resource "random_pet" "name" {
 		modHost.AddFileToModule("plan-fail-module", "main.tf", planFailModule)
 
 		ws := newWs("test-error-plan-failure", modHost.ModuleSource("plan-fail-module"))
-		ws.Spec.PreventDestroy = false
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
@@ -380,7 +462,7 @@ resource "random_pet" "name" {
 		modHost.AddFileToModule("apply-fail-module", "main.tf", applyFailModule)
 
 		ws := newWs("test-error-apply-failure", modHost.ModuleSource("apply-fail-module"))
-		ws.Spec.PreventDestroy = false
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
 		ws.Spec.AutoApply = true
 		// Add null provider before creating the workspace
 		ws.Spec.ProviderSpecs = append(ws.Spec.ProviderSpecs, tfv1alphav1.ProviderSpec{
@@ -407,7 +489,7 @@ resource "random_pet" "name" {
 	t.Run("error message cleared on successful reconciliation", func(t *testing.T) {
 		t.Parallel()
 		ws := newWs("test-error-cleared", modHost.ModuleSource("my-module"))
-		ws.Spec.PreventDestroy = false
+		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
