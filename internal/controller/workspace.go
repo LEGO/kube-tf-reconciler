@@ -590,7 +590,7 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 
 	if ws.Spec.Destroy == tfv1alphav1.DestroyBehaviourManual && !ws.ManualDestroyRequested() {
 		now := metav1.Now()
-		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "Auto-destroy is disabled, awaiting manual destroy")
+		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFDestroyEventReason, "Auto-destroy is disabled, awaiting manual destroy")
 		err := r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Auto-destroy enabled is disabled, awaiting manual destroy", func(s *tfv1alphav1.WorkspaceStatus) {
 			s.LastExecutionTime = &now
 			s.NewApplyNeeded = false
