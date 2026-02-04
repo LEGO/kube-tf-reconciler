@@ -6,9 +6,10 @@ import (
 )
 
 const (
-	ManualApplyAnnotation = "tf-reconcile.lego.com/manual-apply"
-	WorkspacePlanLabel    = "tf-reconcile.lego.com/workspace"
-	WorkspaceFinalizer    = "tf-reconcile.lego.com/finalizer"
+	ManualApplyAnnotation   = "tf-reconcile.lego.com/manual-apply"
+	ManualDestroyAnnotation = "tf-reconcile.lego.com/manual-destroy"
+	WorkspacePlanLabel      = "tf-reconcile.lego.com/workspace"
+	WorkspaceFinalizer      = "tf-reconcile.lego.com/finalizer"
 )
 
 // BackendSpec defines the backend configuration for the workspace
@@ -167,9 +168,17 @@ type WorkspaceSpec struct {
 	// +kubebuilder:default=false
 	AutoApply bool `json:"autoApply"`
 
+	// AutoDestroy is a flag to indicate if the workspace should be automatically destroyed
+	// +kubebuilder:default=false
+	AutoDestroy bool `json:"autoDestroy"`
+
 	// PreventDestroy is a flag to indicate if terraform destroy should be skipped when the resource is deleted
 	// +kubebuilder:default=true
+	// +kubebuilder:deprecatedversion:warning="PreventDestroy has been replaced by SkipDestroy"
 	PreventDestroy bool `json:"preventDestroy"`
+	// SkipDestroy is a flag to indicate if terraform destroy should be skipped when the resource is deleted
+	// +kubebuilder:default=true
+	SkipDestroy bool `json:"skipDestroy"`
 
 	// TerraformRC contains the content of the .terraformrc file
 	// +kubebuilder:validation:Optional
@@ -285,6 +294,11 @@ type Workspace struct {
 
 func (w *Workspace) ManualApplyRequested() bool {
 	_, ok := w.Annotations[ManualApplyAnnotation]
+	return ok
+}
+
+func (w *Workspace) ManualDestroyRequested() bool {
+	_, ok := w.Annotations[ManualDestroyAnnotation]
 	return ok
 }
 

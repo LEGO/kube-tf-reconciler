@@ -578,12 +578,27 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 	log.V(DebugLevel).Info("handling deletion and finalizers starting")
 	defer log.V(DebugLevel).Info("handling deletion and finalizers completed")
 
-	if !ws.Spec.PreventDestroy {
+	if !(ws.Spec.PreventDestroy && ws.Spec.SkipDestroy) {
 		err := tf.Destroy(ctx)
 		if err != nil {
 			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFDestroyEventReason, "Failed to destroy terraform resources: %v", err)
 			return ctrl.Result{}, fmt.Errorf("failed to destroy terraform resources: %w", err), true
 		}
+	}
+
+	if !ws.Spec.AutoDestroy && !ws.ManualDestroyRequested() {
+		now := metav1.Now()
+		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "Auto-destroy is disabled, awaiting manual destroy")
+		err := r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Destroy skipped, no auto-destroy enabled", func(s *tfv1alphav1.WorkspaceStatus) {
+			s.LastExecutionTime = &now
+			s.NewApplyNeeded = false
+			s.Backoff.RetryCount = 0
+		})
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update workspace status after destroy pause: %w", err), true
+		}
+
+		return ctrl.Result{}, nil, false
 	}
 
 	err := r.Tf.CleanupWorkspace(ws)
