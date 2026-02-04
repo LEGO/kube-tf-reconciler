@@ -61,7 +61,7 @@ func (s *ModuleStateServer) Events() map[string][]ModuleEvent {
 }
 
 func (s *ModuleStateServer) Clear() {
-	s.events = nil
+	s.events = make(map[string][]ModuleEvent)
 }
 
 func (s *ModuleStateServer) CurrentStatus(name string) ModuleEvent {
