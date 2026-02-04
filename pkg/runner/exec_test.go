@@ -54,22 +54,23 @@ func TestWithOutputStream(t *testing.T) {
 }
 
 func TestMultipleVersions(t *testing.T) {
+	ctx := t.Context()
 	dir := t.TempDir()
 	e := New(dir)
 
-	terraformBinary, err := e.getTerraformBinary(t.Context(), "1.11.2")
+	terraformBinary, err := e.getTerraformBinary(ctx, "1.11.2")
 	require.NoError(t, err)
 	tf, err := tfexec.NewTerraform(dir, terraformBinary)
 	require.NoError(t, err)
-	version, _, err := tf.Version(t.Context(), false)
+	version, _, err := tf.Version(ctx, false)
 	require.NoError(t, err)
 	assert.Equal(t, "1.11.2", version.String())
 
-	terraformBinary, err = e.getTerraformBinary(t.Context(), "1.14.3")
+	terraformBinary, err = e.getTerraformBinary(ctx, "1.14.3")
 	require.NoError(t, err)
 	tf, err = tfexec.NewTerraform(dir, terraformBinary)
 	require.NoError(t, err)
-	version, _, err = tf.Version(t.Context(), false)
+	version, _, err = tf.Version(ctx, false)
 	require.NoError(t, err)
 	assert.Equal(t, "1.14.3", version.String())
 }
