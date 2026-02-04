@@ -347,6 +347,11 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
+	// Don't plan deleted workspaces
+	if !ws.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil, false
+	}
+
 	if ws.ManualApplyRequested() {
 		log.V(DebugLevel).Info("manual apply requested, proceeding with existing plan")
 		return ctrl.Result{}, nil, false
@@ -431,6 +436,11 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 
 func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
+
+	// Don't apply deleted workspaces
+	if !ws.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil, false
+	}
 
 	if !ws.Status.NewApplyNeeded && !ws.ManualApplyRequested() {
 		return ctrl.Result{}, nil, false
@@ -578,7 +588,24 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 	log.V(DebugLevel).Info("handling deletion and finalizers starting")
 	defer log.V(DebugLevel).Info("handling deletion and finalizers completed")
 
-	if !ws.Spec.PreventDestroy {
+	if ws.Spec.Destroy == tfv1alphav1.DestroyBehaviourManual && !ws.ManualDestroyRequested() {
+		now := metav1.Now()
+		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFDestroyEventReason, "Auto-destroy is disabled, awaiting manual destroy")
+		err := r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Auto-destroy is disabled, awaiting manual destroy", func(s *tfv1alphav1.WorkspaceStatus) {
+			s.LastExecutionTime = &now
+			s.NewApplyNeeded = false
+			s.Backoff.RetryCount = 0
+		})
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update workspace status after destroy pause: %w", err), true
+		}
+
+		return ctrl.Result{}, nil, false
+	}
+
+	if ws.Spec.Destroy == tfv1alphav1.DestroyBehaviourAuto ||
+		ws.Spec.Destroy == tfv1alphav1.DestroyBehaviourManual ||
+		ws.Spec.Destroy == "" && !ws.Spec.PreventDestroy {
 		err := tf.Destroy(ctx)
 		if err != nil {
 			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFDestroyEventReason, "Failed to destroy terraform resources: %v", err)

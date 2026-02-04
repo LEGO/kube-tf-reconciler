@@ -5,10 +5,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type DestroyBehaviour string
+
+// These are valid destroy behaviours. "DestroyBehaviourSkip" means nothing is
+// done when a Workspace is deleted. "DestroyBehaviourAuto" means that a
+// `terraform destroy` action is automatically invoked when the resource is
+// deleted and "DestroyBehaviourManual" means that the Workspace will not be
+// deleted until a destroy action has been invoked manually via the
+// ManualDestroyAnnotation.
 const (
-	ManualApplyAnnotation = "tf-reconcile.lego.com/manual-apply"
-	WorkspacePlanLabel    = "tf-reconcile.lego.com/workspace"
-	WorkspaceFinalizer    = "tf-reconcile.lego.com/finalizer"
+	DestroyBehaviourSkip   DestroyBehaviour = "skip"
+	DestroyBehaviourAuto   DestroyBehaviour = "auto"
+	DestroyBehaviourManual DestroyBehaviour = "manual"
+)
+
+const (
+	ManualApplyAnnotation   = "tf-reconcile.lego.com/manual-apply"
+	ManualDestroyAnnotation = "tf-reconcile.lego.com/manual-destroy"
+	WorkspacePlanLabel      = "tf-reconcile.lego.com/workspace"
+	WorkspaceFinalizer      = "tf-reconcile.lego.com/finalizer"
 )
 
 // BackendSpec defines the backend configuration for the workspace
@@ -169,7 +184,17 @@ type WorkspaceSpec struct {
 
 	// PreventDestroy is a flag to indicate if terraform destroy should be skipped when the resource is deleted
 	// +kubebuilder:default=true
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:deprecatedversion:warning="PreventDestroy has been replaced by Destroy"
 	PreventDestroy bool `json:"preventDestroy"`
+
+	// Destroy indicates how to react when the Workspace is deleted, it can
+	// either do nothing, automatically run the `terraform destroy` action or
+	// await a manual destroy request.
+	// +required
+	// +kubebuilder:default=skip
+	// +kubebuilder:validation:Enum=auto;manual;skip
+	Destroy DestroyBehaviour `json:"destroy"`
 
 	// TerraformRC contains the content of the .terraformrc file
 	// +kubebuilder:validation:Optional
@@ -285,6 +310,11 @@ type Workspace struct {
 
 func (w *Workspace) ManualApplyRequested() bool {
 	_, ok := w.Annotations[ManualApplyAnnotation]
+	return ok
+}
+
+func (w *Workspace) ManualDestroyRequested() bool {
+	_, ok := w.Annotations[ManualDestroyAnnotation]
 	return ok
 }
 

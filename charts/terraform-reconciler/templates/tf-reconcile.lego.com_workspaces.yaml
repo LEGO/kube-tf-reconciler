@@ -122,6 +122,17 @@ spec:
                 required:
                 - type
                 type: object
+              destroy:
+                default: skip
+                description: |-
+                  Destroy indicates how to react when the Workspace is deleted, it can
+                  either do nothing, automatically run the `terraform destroy` action or
+                  await a manual destroy request.
+                enum:
+                - auto
+                - manual
+                - skip
+                type: string
               module:
                 description: Module is the module configuration for the workspace
                 properties:
@@ -257,6 +268,7 @@ spec:
             required:
             - autoApply
             - backend
+            - destroy
             - module
             - preventDestroy
             - providerSpecs
