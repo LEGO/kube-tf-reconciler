@@ -98,6 +98,11 @@ spec:
                 description: AutoApply is a flag to indicate if the workspace should
                   be automatically applied
                 type: boolean
+              autoDestroy:
+                default: false
+                description: AutoDestroy is a flag to indicate if the workspace should
+                  be automatically destroyed
+                type: boolean
               backend:
                 description: Backend is the backend configuration for the workspace
                 properties:
@@ -192,6 +197,11 @@ spec:
                   - source
                   type: object
                 type: array
+              skipDestroy:
+                default: true
+                description: SkipDestroy is a flag to indicate if terraform destroy
+                  should be skipped when the resource is deleted
+                type: boolean
               terraformRC:
                 description: TerraformRC contains the content of the .terraformrc
                   file
@@ -256,10 +266,12 @@ spec:
                 type: object
             required:
             - autoApply
+            - autoDestroy
             - backend
             - module
             - preventDestroy
             - providerSpecs
+            - skipDestroy
             - terraformVersion
             type: object
           status:
