@@ -184,6 +184,7 @@ type WorkspaceSpec struct {
 
 	// PreventDestroy is a flag to indicate if terraform destroy should be skipped when the resource is deleted
 	// +kubebuilder:default=true
+	// +kubebuilder:validation:Optional
 	// +kubebuilder:deprecatedversion:warning="PreventDestroy has been replaced by Destroy"
 	PreventDestroy bool `json:"preventDestroy"`
 
