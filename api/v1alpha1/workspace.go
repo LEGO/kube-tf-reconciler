@@ -5,6 +5,20 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type DestroyBehaviour string
+
+// These are valid destroy behaviours. "DestroyBehaviourSkip" means nothing is
+// done when a Workspace is deleted. "DestroyBehaviourAuto" means that a
+// `terraform destroy` action is automatically invoked when the resource is
+// deleted and "DestroyBehaviourManual" means that the Workspace will not be
+// deleted until a destroy action has been invoked manually via the
+// ManualDestroyAnnotation.
+const (
+	DestroyBehaviourSkip   DestroyBehaviour = "skip"
+	DestroyBehaviourAuto   DestroyBehaviour = "auto"
+	DestroyBehaviourManual DestroyBehaviour = "manual"
+)
+
 const (
 	ManualApplyAnnotation   = "tf-reconcile.lego.com/manual-apply"
 	ManualDestroyAnnotation = "tf-reconcile.lego.com/manual-destroy"
@@ -168,17 +182,18 @@ type WorkspaceSpec struct {
 	// +kubebuilder:default=false
 	AutoApply bool `json:"autoApply"`
 
-	// AutoDestroy is a flag to indicate if the workspace should be automatically destroyed
-	// +kubebuilder:default=false
-	AutoDestroy bool `json:"autoDestroy"`
-
 	// PreventDestroy is a flag to indicate if terraform destroy should be skipped when the resource is deleted
 	// +kubebuilder:default=true
-	// +kubebuilder:deprecatedversion:warning="PreventDestroy has been replaced by SkipDestroy"
+	// +kubebuilder:deprecatedversion:warning="PreventDestroy has been replaced by Destroy"
 	PreventDestroy bool `json:"preventDestroy"`
-	// SkipDestroy is a flag to indicate if terraform destroy should be skipped when the resource is deleted
-	// +kubebuilder:default=true
-	SkipDestroy bool `json:"skipDestroy"`
+
+	// Destroy indicates how to react when the Workspace is deleted, it can
+	// either do nothing, automatically run the `terraform destroy` action or
+	// await a manual destroy request.
+	// +required
+	// +kubebuilder:default=skip
+	// +kubebuilder:validation:Enum=auto;manual;skip
+	Destroy DestroyBehaviour `json:"destroy"`
 
 	// TerraformRC contains the content of the .terraformrc file
 	// +kubebuilder:validation:Optional

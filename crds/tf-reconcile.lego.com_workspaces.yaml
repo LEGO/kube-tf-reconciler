@@ -98,11 +98,6 @@ spec:
                 description: AutoApply is a flag to indicate if the workspace should
                   be automatically applied
                 type: boolean
-              autoDestroy:
-                default: false
-                description: AutoDestroy is a flag to indicate if the workspace should
-                  be automatically destroyed
-                type: boolean
               backend:
                 description: Backend is the backend configuration for the workspace
                 properties:
@@ -127,6 +122,17 @@ spec:
                 required:
                 - type
                 type: object
+              destroy:
+                default: skip
+                description: |-
+                  Destroy indicates how to react when the Workspace is deleted, it can
+                  either do nothing, automatically run the `terraform destroy` action or
+                  await a manual destroy request.
+                enum:
+                - auto
+                - manual
+                - skip
+                type: string
               module:
                 description: Module is the module configuration for the workspace
                 properties:
@@ -197,11 +203,6 @@ spec:
                   - source
                   type: object
                 type: array
-              skipDestroy:
-                default: true
-                description: SkipDestroy is a flag to indicate if terraform destroy
-                  should be skipped when the resource is deleted
-                type: boolean
               terraformRC:
                 description: TerraformRC contains the content of the .terraformrc
                   file
@@ -266,12 +267,11 @@ spec:
                 type: object
             required:
             - autoApply
-            - autoDestroy
             - backend
+            - destroy
             - module
             - preventDestroy
             - providerSpecs
-            - skipDestroy
             - terraformVersion
             type: object
           status:
