@@ -270,7 +270,6 @@ spec:
             - backend
             - destroy
             - module
-            - preventDestroy
             - providerSpecs
             - terraformVersion
             type: object
