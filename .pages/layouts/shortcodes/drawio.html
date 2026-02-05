@@ -1,0 +1,11 @@
+{{ $filePath := print (path.Join (path.Dir .Page.File.Path) (.Get "src")) }}
+{{ $chart := (os.ReadFile $filePath) }}
+
+<div class="mxgraph" style="max-width:100%;border:1px solid transparent;" data-mxgraph="{
+  &quot;highlight&quot;: &quot;#0000ff&quot;,
+  &quot;nav&quot;: true,
+  &quot;resize&quot;: true,
+  &quot;toolbar&quot;: &quot;zoom layers tags lightbox&quot;,
+  &quot;edit&quot;: &quot;_blank&quot;,
+  &quot;xml&quot;: {{jsonify $chart}}
+}"></div>

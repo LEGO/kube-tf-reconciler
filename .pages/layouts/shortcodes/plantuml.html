@@ -1,0 +1,16 @@
+{{ if hugo.IsServer }}
+    {{ $filePath := print (path.Join (path.Dir .Page.File.Path) (.Get "src")) }}
+    {{ $chart := (os.ReadFile $filePath) }}
+
+    <img id='plantuml-{{ .Ordinal }}'/>
+
+    <script type="text/javascript" defer>
+        document.addEventListener("DOMContentLoaded", function(){
+            console.log('PlantUML', 'plantuml-{{ .Ordinal }}');
+            compress('{{ $chart }}', 'plantuml-{{ .Ordinal }}');
+        });
+    </script>
+{{ else }}
+    {{ $filePath := print (path.Join (path.Dir .Page.File.Path) (path.Dir (.Get "src")) (path.BaseName (.Get "src"))) ".svg" }}
+    {{ safeHTML (os.ReadFile $filePath) }}
+{{ end }}

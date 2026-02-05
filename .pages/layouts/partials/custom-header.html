@@ -1,0 +1,24 @@
+<!-- Partial intended to be overwritten to add custom headers, like CSS or any other info
+<style type="text/css">
+    /* Custom css */
+</style>
+-->
+<style type="text/css">
+  /** Unset theme selectors, they are hitting all subtrees*/
+  #sidebar ul.topics li.parent ul, #sidebar ul.topics li.active ul {
+    display: none;
+  }
+  /** Display lists in the direct tree from root to current page */
+  #sidebar ul.topics li.parent > ul, #sidebar ul.topics li.active > ul {
+    display: block;
+  }
+  .customer-data__title {
+     display: flex;
+     align-items: baseline;
+   }
+  .customer-data__version {
+    font-size: smaller;
+    font-style: italic;
+  }
+
+</style>
