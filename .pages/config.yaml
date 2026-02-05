@@ -1,0 +1,51 @@
+title: kube-tf-reconciler
+baseURL: https://lego.github.io/kube-tf-reconciler/
+languageCode: en-us
+# theme: hugo-theme-relearn
+summaryLength: 25
+pluralizelisttitles: false
+outputs:
+  home:
+    - html
+markup:
+  goldmark:
+    renderer:
+      unsafe: true
+  highlight:
+    codeFences: true
+    guessSyntax: true
+    lineNumbersInTable: false
+    noClasses: false
+params:
+  disableLanguageSwitchingButton: true
+  themeVariant:
+    - auto:
+        - zen-light
+        - zen-dark
+      identifier: zen-auto
+      name: Auto
+    - identifier: zen-light
+      name: Light
+    - identifier: zen-dark
+      name: Dark
+  collapsibleMenu: true
+  alwaysopen: false
+menu:
+  shortcuts:
+    - name: <i class='fab fa-fw fa-github'></i> GitHub Repo
+      url: https://www.github.com/LEGO/kube-tf-reconciler
+      weight: 1
+    - name: <i class='fas fa-fw fa-book-open'></i> Docs Info
+      url: /how-to/work-with-docs
+      weight: 3
+module:
+  imports:
+    - path: github.com/McShelby/hugo-theme-relearn
+      disable: false
+  mounts:
+    - source: ../docs
+      target: content
+    - source: ../README.md
+      target: content/_index.md
+    - source: ../docs/readme
+      target: content/docs/readme

@@ -1,0 +1,40 @@
+name: Build docs
+
+on:
+  # Runs on pushes targeting the default branch
+  push:
+    branches-ignore: ["main"]
+    paths:
+      - .pages/**
+      - docs/**
+      - .github/workflows/gh-pages.yaml
+      - README.md
+
+env:
+  PLANTUML_VERSION: '1.2022.13'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Hugo
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: '0.152.2'
+          extended: true
+
+      - name: Setup PlantUML
+        run: |
+          sudo apt-get update --yes
+          sudo apt-get install --yes --no-install-recommends \
+              graphviz fonts-dejavu default-jre
+          curl -L "https://github.com/plantuml/plantuml/releases/download/v${{ env.PLANTUML_VERSION }}/plantuml-${{ env.PLANTUML_VERSION }}.jar" -o plantuml.jar
+
+      - name: Run PlantUML
+        run: java -jar plantuml.jar "docs/**.puml" -tsvg
+
+      - name: Build
+        run: hugo --panicOnWarning --minify --source .pages --noChmod

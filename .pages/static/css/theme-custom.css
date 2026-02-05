@@ -1,0 +1,20 @@
+@import "theme-red.css";
+
+b,
+strong,
+label,
+th {
+  font-weight: 600;
+}
+
+.tf-logo {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  background-image: url("../img/tf.svg");
+  background-repeat: no-repeat;
+}
+
+#TableOfContents {
+  font-size: 1rem;
+}
