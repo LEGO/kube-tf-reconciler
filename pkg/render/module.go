@@ -2,6 +2,7 @@ package render
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -30,47 +31,68 @@ func Module(body *hclwrite.Body, m *tfreconcilev1alpha1.ModuleSpec) error {
 		}
 
 		// Map the inputs to the module body
-		mapInputsToModuleBody(moduleBlock.Body(), inputs)
+		err = mapInputsToModuleBody(moduleBlock.Body(), inputs)
+		if err != nil {
+			return fmt.Errorf("failed to map inputs to module: %w", err)
+		}
 	}
 
 	return nil
 }
 
-func mapInputsToModuleBody(body *hclwrite.Body, inputs map[string]interface{}) {
+func mapInputsToModuleBody(body *hclwrite.Body, inputs map[string]interface{}) error {
 	keys := slices.Collect(maps.Keys(inputs))
 	sort.Strings(keys)
+	var err error
 	for _, key := range keys {
-		value := convertToCtyValue(inputs[key])
+		value, convErr := convertToCtyValue(inputs[key])
+		if convErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to convert '%s' value to cty: %w", key, convErr))
+		}
 		if !value.IsNull() {
 			body.SetAttributeValue(key, value)
 		}
 	}
+
+	return err
 }
 
-func convertToCtyValue(value interface{}) cty.Value {
+func convertToCtyValue(value interface{}) (cty.Value, error) {
 	switch v := value.(type) {
 	case string:
-		return cty.StringVal(v)
+		return cty.StringVal(v), nil
 	case float64:
-		return cty.NumberFloatVal(v)
+		return cty.NumberFloatVal(v), nil
 	case bool:
-		return cty.BoolVal(v)
+		return cty.BoolVal(v), nil
 	case map[string]interface{}:
 		m := map[string]cty.Value{}
+		var err, convErr error
 		for key, val := range v {
-			m[key] = convertToCtyValue(val)
+			m[key], convErr = convertToCtyValue(val)
+			if err != nil {
+				err = errors.Join(err, fmt.Errorf("failed to convert '%s' value to cty: %w", key, convErr))
+			}
 		}
-		return cty.ObjectVal(m)
+		return cty.ObjectVal(m), err
 	case []interface{}:
 		if len(v) == 0 {
-			return cty.ListValEmpty(cty.DynamicPseudoType)
+			return cty.ListValEmpty(cty.DynamicPseudoType), nil
 		}
 		var list []cty.Value
-		for _, item := range v {
-			list = append(list, convertToCtyValue(item))
+		var err error
+		for idx, item := range v {
+			cv, convErr := convertToCtyValue(item)
+			if convErr != nil {
+				err = errors.Join(err, fmt.Errorf("failed to convert [%d] value to cty: %w", idx, convErr))
+			}
+			list = append(list, cv)
 		}
-		return cty.ListVal(list)
+		if !cty.CanListVal(list) {
+			return cty.ListValEmpty(cty.DynamicPseudoType), errors.Join(err, fmt.Errorf("inconsistent list value types"))
+		}
+		return cty.ListVal(list), err
 	default:
-		return cty.NilVal
+		return cty.NilVal, errors.New(fmt.Sprintf("unexpected value type %T", value))
 	}
 }

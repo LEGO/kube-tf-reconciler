@@ -66,3 +66,33 @@ func TestEmptyListInput(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, expectedWs, string(f.Bytes()))
 }
+
+func TestInconsistentListInput(t *testing.T) {
+	f := hclwrite.NewEmptyFile()
+
+	expectedWs := `module "my-module" {
+  source = "./my-module"
+  foo    = []
+  input  = []
+  something = {
+    bool = true
+  }
+  test = "test"
+}
+`
+
+	err := Module(f.Body(), &tfreconcilev1alpha1.ModuleSpec{
+		Source: "./my-module",
+		Name:   "my-module",
+		Inputs: testutils.Json(map[string]interface{}{
+			"test":  "test",
+			"foo":   []string{},
+			"input": []any{42, "test2"},
+			"something": map[string]interface{}{
+				"bool": true,
+			},
+		}),
+	})
+	assert.Error(t, err)
+	assert.Equal(t, expectedWs, string(f.Bytes()))
+}
