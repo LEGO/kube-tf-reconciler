@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -53,6 +55,23 @@ func SetWorkspacePhase(namespace, workspace, phase string) {
 	if phase != "" {
 		WorkspacePhase.WithLabelValues(namespace, workspace, phase).Set(1)
 		WorkspacePhaseTimestamp.WithLabelValues(namespace, workspace, phase).SetToCurrentTime()
+	}
+}
+
+func SetExistingWorkspacePhase(namespace, workspace, phase string, phaseTime time.Time) {
+	WorkspacePhase.DeletePartialMatch(prometheus.Labels{
+		"namespace": namespace,
+		"workspace": workspace,
+	})
+
+	WorkspacePhaseTimestamp.DeletePartialMatch(prometheus.Labels{
+		"namespace": namespace,
+		"workspace": workspace,
+	})
+
+	if phase != "" && !phaseTime.IsZero() {
+		WorkspacePhase.WithLabelValues(namespace, workspace, phase).Set(1)
+		WorkspacePhaseTimestamp.WithLabelValues(namespace, workspace, phase).Set(float64(phaseTime.UnixNano()) / 1e9)
 	}
 }
 
