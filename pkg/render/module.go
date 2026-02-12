@@ -43,17 +43,18 @@ func Module(body *hclwrite.Body, m *tfreconcilev1alpha1.ModuleSpec) error {
 func mapInputsToModuleBody(body *hclwrite.Body, inputs map[string]interface{}) error {
 	keys := slices.Collect(maps.Keys(inputs))
 	sort.Strings(keys)
+	var err error
 	for _, key := range keys {
-		value, err := convertToCtyValue(inputs[key])
-		if err != nil {
-			return fmt.Errorf("failed to convert %s value to cty: %w", key, err)
+		value, convErr := convertToCtyValue(inputs[key])
+		if convErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to convert '%s' value to cty: %w", key, convErr))
 		}
 		if !value.IsNull() {
 			body.SetAttributeValue(key, value)
 		}
 	}
 
-	return nil
+	return err
 }
 
 func convertToCtyValue(value interface{}) (cty.Value, error) {
@@ -70,7 +71,7 @@ func convertToCtyValue(value interface{}) (cty.Value, error) {
 		for key, val := range v {
 			m[key], convErr = convertToCtyValue(val)
 			if err != nil {
-				err = errors.Join(err, fmt.Errorf("failed to convert %s value to cty: %w", key, convErr))
+				err = errors.Join(err, fmt.Errorf("failed to convert '%s' value to cty: %w", key, convErr))
 			}
 		}
 		return cty.ObjectVal(m), err
@@ -83,7 +84,7 @@ func convertToCtyValue(value interface{}) (cty.Value, error) {
 		for idx, item := range v {
 			cv, convErr := convertToCtyValue(item)
 			if convErr != nil {
-				err = errors.Join(err, fmt.Errorf("failed to convert %d value to cty: %w", idx, convErr))
+				err = errors.Join(err, fmt.Errorf("failed to convert [%d] value to cty: %w", idx, convErr))
 			}
 			list = append(list, cv)
 		}
