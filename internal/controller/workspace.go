@@ -45,7 +45,7 @@ const (
 
 	defaultPlanHistoryLimit = 3
 	planCreationTimeout     = 2 * time.Second
-	nextRefreshInterval     = 10 * time.Minute
+	nextRefreshInterval     = 30 * time.Minute
 
 	TFErrEventReason      = "TerraformError"
 	TFPlanEventReason     = "TerraformPlan"
@@ -83,6 +83,16 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		metrics.CleanupWorkspaceMetrics(req.Namespace, req.Name)
 		return ctrl.Result{}, nil
+	}
+
+	// Record the last result phase in metrics
+	switch ws.Status.TerraformPhase {
+	case TFPhaseErrored:
+		metrics.SetExistingWorkspacePhase(ws.Namespace, ws.Name, ws.Status.TerraformPhase, ws.Status.LastErrorTime.Time)
+	case TFPhaseCompleted:
+		metrics.SetExistingWorkspacePhase(ws.Namespace, ws.Name, ws.Status.TerraformPhase, ws.Status.LastExecutionTime.Time)
+	case TFPhaseIdle:
+		metrics.SetWorkspacePhase(ws.Namespace, ws.Name, ws.Status.TerraformPhase)
 	}
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
