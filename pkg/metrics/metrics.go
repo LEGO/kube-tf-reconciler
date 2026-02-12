@@ -69,7 +69,7 @@ func SetExistingWorkspacePhase(namespace, workspace, phase string, phaseTime tim
 		"workspace": workspace,
 	})
 
-	if phase != "" {
+	if phase != "" && !phaseTime.IsZero() {
 		WorkspacePhase.WithLabelValues(namespace, workspace, phase).Set(1)
 		WorkspacePhaseTimestamp.WithLabelValues(namespace, workspace, phase).Set(float64(phaseTime.UnixNano()) / 1e9)
 	}
