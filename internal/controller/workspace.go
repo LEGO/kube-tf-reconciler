@@ -138,11 +138,15 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Record the last result phase in metrics
 	switch ws.Status.TerraformPhase {
 	case TFPhaseErrored:
-		metrics.SetExistingWorkspacePhase(ws.Namespace, ws.Name, ws.Status.TerraformPhase, ws.Status.LastErrorTime.Time)
+		if !ws.Status.LastErrorTime.IsZero() {
+			metrics.SetExistingWorkspacePhase(ws.Namespace, ws.Name, TFPhaseErrored, ws.Status.LastErrorTime.Time)
+		}
 	case TFPhaseCompleted:
-		metrics.SetExistingWorkspacePhase(ws.Namespace, ws.Name, ws.Status.TerraformPhase, ws.Status.LastExecutionTime.Time)
+		if !ws.Status.LastExecutionTime.IsZero() {
+			metrics.SetExistingWorkspacePhase(ws.Namespace, ws.Name, TFPhaseCompleted, ws.Status.LastExecutionTime.Time)
+		}
 	case TFPhaseIdle:
-		metrics.SetWorkspacePhase(ws.Namespace, ws.Name, ws.Status.TerraformPhase)
+		metrics.SetWorkspacePhase(ws.Namespace, ws.Name, TFPhaseIdle)
 	}
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
