@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -36,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
@@ -61,6 +64,53 @@ const (
 	TFPhaseCompleted    = "Completed"
 	TFPhaseErrored      = "Errored"
 )
+
+func isNil(arg any) bool {
+	if v := reflect.ValueOf(arg); !v.IsValid() || ((v.Kind() == reflect.Ptr ||
+		v.Kind() == reflect.Interface ||
+		v.Kind() == reflect.Slice ||
+		v.Kind() == reflect.Map ||
+		v.Kind() == reflect.Chan ||
+		v.Kind() == reflect.Func) && v.IsNil()) {
+		return true
+	}
+	return false
+}
+
+type AnnotationChangedPredicate = TypedAnnotationChangedPredicate[client.Object]
+
+// TypedAnnotationChangedPredicate implements a default update predicate
+// function on annotation change.
+type TypedAnnotationChangedPredicate[object metav1.Object] struct {
+	predicate.TypedFuncs[object]
+}
+
+// Update implements default UpdateEvent filter for validating annotation
+// change, allowing to ignore some annotations.
+func (TypedAnnotationChangedPredicate[object]) Update(e event.TypedUpdateEvent[object]) bool {
+	if isNil(e.ObjectOld) {
+		slog.Error("Update event has no old object to update", "event", e)
+		return false
+	}
+	if isNil(e.ObjectNew) {
+		slog.Error("Update event has no new object for update", "event", e)
+		return false
+	}
+
+	newAnnotations := maps.Clone(e.ObjectNew.GetAnnotations())
+	oldAnnotations := maps.Clone(e.ObjectOld.GetAnnotations())
+
+	ignoreAnnotations := []string{
+		"kubectl.kubernetes.io/last-applied-configuration",
+	}
+
+	for _, annotation := range ignoreAnnotations {
+		delete(newAnnotations, annotation)
+		delete(oldAnnotations, annotation)
+	}
+
+	return !maps.Equal(newAnnotations, oldAnnotations)
+}
 
 // WorkspaceReconciler reconciles a Workspace object
 type WorkspaceReconciler struct {
@@ -685,7 +735,13 @@ func (r *WorkspaceReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Man
 	go r.refreshLeases(ctx)
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&tfv1alphav1.Workspace{}, builder.WithPredicates(predicate.Or(predicate.GenerationChangedPredicate{}, predicate.LabelChangedPredicate{}, predicate.AnnotationChangedPredicate{}))).
+		For(&tfv1alphav1.Workspace{}, builder.WithPredicates(
+			predicate.Or(
+				predicate.GenerationChangedPredicate{},
+				predicate.LabelChangedPredicate{},
+				AnnotationChangedPredicate{},
+			),
+		)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 5}). // Match terraform execution capacity
 		Complete(r)
 }
