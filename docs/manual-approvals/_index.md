@@ -11,7 +11,7 @@ A `Workspace` resource has two settings that allow you to control how
 aggressive the automation of the reconciliation is. The `autoApply: <true;
 false>` and the `destroy: <auto;manual;skip>` settings.
 
-## Human intervention before applying changes
+## Human intervention before running apply
 Setting `autoApply: true` means that whenever a difference between desired 
 and actual state is detected, a `terraform apply` is automatically run. 
 
@@ -21,7 +21,7 @@ adding the annotation `tf-reconcile.lego.com/manual-apply: true` to the
 the annotation will be removed from the `Workspace` resource to make sure it 
 only triggers a single apply.
 
-## Human intervention before apply changes
+## Human intervention before running destroy 
 Setting `destroy: auto` means that whenever a `Workspace` resource is 
 deleted, the `tf-reconcile.lego.com/finalizer` finalizer will block deletion 
 until a `terraform destroy` has successfully run.
