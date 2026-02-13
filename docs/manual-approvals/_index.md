@@ -28,7 +28,7 @@ until a `terraform destroy` has successfully run.
 
 You can also get a behaviour that is similar to `autoApply: false` when you 
 set `destroy: manual` and then you have to add the annotation 
-`tf-reconcile.lego.com/manual-apply: true` to the `Workspace` resource in 
+`tf-reconcile.lego.com/manual-destroy: true` to the `Workspace` resource in 
 order to trigger the `terraform destroy` action.
 
 If you want to avoid `terraform destroy` actions to run entirely you can set 
