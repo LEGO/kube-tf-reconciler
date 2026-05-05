@@ -800,12 +800,15 @@ func TestBackoffBehaviour(t *testing.T) {
 	t.Run("skips backoff and resets counter when generation has changed", func(t *testing.T) {
 		// The reconcile will proceed past backoff (resetting its state) and eventually fail due
 		// to no real TF setup. The backoff will then be re-applied at count 0 (fresh start).
-		result, _ := reconciler.Reconcile(t.Context(), reconcile.Request{
+		result, err := reconciler.Reconcile(t.Context(), reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Namespace: changedWs.Namespace,
 				Name:      changedWs.Name,
 			},
 		})
+
+		// The reconcile proceeds past the backoff check and fails for other reasons.
+		assert.Error(t, err, "expected reconcile to return an error due to no real TF setup")
 
 		// Verify the reconcile did not return early with the original 10-minute backoff delay.
 		assert.Less(t, result.RequeueAfter, 10*time.Minute, "expected backoff to be skipped when generation changes")
