@@ -158,6 +158,9 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			ws.Status.Backoff.NextRetryTime = nil
 			ws.Status.Backoff.RetryCount = 0
 			if err := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old)); err != nil {
+				// Log the error but continue: the user's intent is to reconcile after making
+				// a change, so we proceed regardless. If the patch keeps failing, the next
+				// reconcile will detect the generation mismatch again and retry the reset.
 				slog.ErrorContext(ctx, "failed to reset backoff status", "error", err.Error())
 			}
 		} else {
