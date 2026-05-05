@@ -735,3 +735,86 @@ resource "random_pet" "name" {
 		assert.NoError(t, err)
 	})
 }
+
+func TestBackoffBehaviour(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
+
+	nextRetryTime := metav1.NewTime(time.Now().Add(10 * time.Minute))
+
+	// Workspace with a pending backoff and generation matching the observed generation (no user change)
+	unchangedWs := newWs("test-backoff-unchanged", "unused")
+	unchangedWs.Generation = 2
+	unchangedWs.Status.ObservedGeneration = 2
+	unchangedWs.Status.Backoff = tfv1alphav1.BackoffStatus{
+		NextRetryTime: &nextRetryTime,
+		RetryCount:    3,
+	}
+
+	// Workspace with a pending backoff but a newer generation (user made a change)
+	changedWs := newWs("test-backoff-changed", "unused")
+	changedWs.Generation = 3
+	changedWs.Status.ObservedGeneration = 2
+	changedWs.Status.Backoff = tfv1alphav1.BackoffStatus{
+		NextRetryTime: &nextRetryTime,
+		RetryCount:    3,
+	}
+
+	fakeClient := clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(unchangedWs, changedWs).
+		WithObjects(unchangedWs, changedWs).
+		Build()
+
+	rootDir := t.TempDir()
+	reconciler := &WorkspaceReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+
+		Tf:       runner.New(rootDir),
+		Renderer: render.NewFileRender(rootDir),
+		leases:   &sync.Map{},
+	}
+
+	t.Run("applies backoff when generation has not changed", func(t *testing.T) {
+		result, err := reconciler.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: unchangedWs.Namespace,
+				Name:      unchangedWs.Name,
+			},
+		})
+
+		require.NoError(t, err)
+		assert.Greater(t, result.RequeueAfter, time.Duration(0), "expected a non-zero RequeueAfter when backoff applies")
+
+		// Verify backoff state is preserved
+		var ws tfv1alphav1.Workspace
+		require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{Namespace: unchangedWs.Namespace, Name: unchangedWs.Name}, &ws))
+		assert.Equal(t, int32(3), ws.Status.Backoff.RetryCount)
+		assert.NotNil(t, ws.Status.Backoff.NextRetryTime)
+	})
+
+	t.Run("skips backoff and resets counter when generation has changed", func(t *testing.T) {
+		// The reconcile will proceed past backoff (resetting its state) and eventually fail due
+		// to no real TF setup. The backoff will then be re-applied at count 0 (fresh start).
+		result, _ := reconciler.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: changedWs.Namespace,
+				Name:      changedWs.Name,
+			},
+		})
+
+		// Verify the reconcile did not return early with the original 10-minute backoff delay.
+		assert.Less(t, result.RequeueAfter, 10*time.Minute, "expected backoff to be skipped when generation changes")
+
+		// Verify the backoff counter was reset before the reconcile ran. Even though r.backoff()
+		// may have been called again due to a reconcile failure, the RetryCount starts from 0
+		// (not 3), proving the reset happened.
+		var ws tfv1alphav1.Workspace
+		require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{Namespace: changedWs.Namespace, Name: changedWs.Name}, &ws))
+		assert.Less(t, ws.Status.Backoff.RetryCount, int32(3), "expected backoff RetryCount to be reset when generation changes")
+	})
+}

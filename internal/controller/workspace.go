@@ -150,8 +150,20 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
-		slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
-		return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+		// If the resource has changed (new generation), skip the backoff and reset the counter
+		// to give the user rapid feedback when they are trying to resolve an issue.
+		if ws.Status.ObservedGeneration != ws.Generation {
+			slog.InfoContext(ctx, "resource changed, resetting backoff", "workspace", req.String())
+			old := ws.DeepCopy()
+			ws.Status.Backoff.NextRetryTime = nil
+			ws.Status.Backoff.RetryCount = 0
+			if err := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old)); err != nil {
+				slog.ErrorContext(ctx, "failed to reset backoff status", "error", err.Error())
+			}
+		} else {
+			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
+			return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+		}
 	}
 
 	// Attempt to acquire lease, if we don't get it, then we don't proceed
