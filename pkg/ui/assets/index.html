@@ -194,32 +194,32 @@
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
         :class="activeTab === 'overview' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
-        @click="activeTab = 'overview'"
+        @click="activeTab = 'overview'; selectedPlan = null"
       >Overview</button>
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
         :class="activeTab === 'plans' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
-        @click="activeTab = 'plans'; ensurePlansLoaded()"
+        @click="activeTab = 'plans'; selectedPlan = null; ensurePlansLoaded()"
       >Plans</button>
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
         :class="activeTab === 'planOutput' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
-        @click="activeTab = 'planOutput'"
+        @click="activeTab = 'planOutput'; selectedPlan = null"
       >Plan Output</button>
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
         :class="activeTab === 'applyOutput' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
-        @click="activeTab = 'applyOutput'"
+        @click="activeTab = 'applyOutput'; selectedPlan = null"
       >Apply Output</button>
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
         :class="activeTab === 'initOutput' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
-        @click="activeTab = 'initOutput'"
+        @click="activeTab = 'initOutput'; selectedPlan = null"
       >Init Output</button>
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
         :class="activeTab === 'currentRender' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
-        @click="activeTab = 'currentRender'"
+        @click="activeTab = 'currentRender'; selectedPlan = null"
       >Current Render</button>
     </div>
 
