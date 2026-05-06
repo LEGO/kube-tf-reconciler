@@ -9,12 +9,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	ctrl "sigs.k8s.io/controller-runtime"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var uiNamespace string
 var uiPort int
+var uiContext string
 
 //nolint:exhaustruct,gochecknoglobals
 var uiCmd = &cobra.Command{
@@ -27,6 +28,7 @@ func init() {
 	rootCmd.AddCommand(uiCmd)
 	uiCmd.Flags().StringVarP(&uiNamespace, "namespace", "n", "", "Namespace to watch (empty = all namespaces)")
 	uiCmd.Flags().IntVarP(&uiPort, "port", "p", 7777, "Port to listen on")
+	uiCmd.Flags().StringVarP(&uiContext, "context", "c", "", "Kubeconfig context to use (default: current context)")
 }
 
 func runUI(cmd *cobra.Command, _ []string) error {
@@ -34,11 +36,19 @@ func runUI(cmd *cobra.Command, _ []string) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(uiScheme))
 	utilruntime.Must(tfreconcilev1alpha1.AddToScheme(uiScheme))
 
-	cfg := ctrl.GetConfigOrDie()
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	overrides := &clientcmd.ConfigOverrides{}
+	if uiContext != "" {
+		overrides.CurrentContext = uiContext
+	}
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
 	k8sClient, err := client.New(cfg, client.Options{Scheme: uiScheme})
 	if err != nil {
 		return fmt.Errorf("failed to create k8s client: %w", err)
 	}
 
-	return ui.Run(cmd.Context(), k8sClient, uiNamespace, uiPort)
+	return ui.Run(cmd.Context(), k8sClient, uiNamespace, uiContext, uiPort)
 }

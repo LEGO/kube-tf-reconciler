@@ -133,6 +133,12 @@ func fetchWorkspaces(ctx context.Context, k8sClient client.Client, namespace str
 			LastErrorMessage:     ws.Status.LastErrorMessage,
 		})
 	}
+	sort.SliceStable(summaries, func(i, j int) bool {
+		if summaries[i].Namespace != summaries[j].Namespace {
+			return summaries[i].Namespace < summaries[j].Namespace
+		}
+		return summaries[i].Name < summaries[j].Name
+	})
 	return summaries, nil
 }
 

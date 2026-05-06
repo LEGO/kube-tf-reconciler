@@ -43,16 +43,12 @@ func (s *state) set(k8sClient client.Client, namespace, context string) {
 	s.context = context
 }
 
-func Run(ctx context.Context, initialClient client.Client, namespace string, port int) error {
-	contexts, currentCtx, err := listKubeContexts()
-	if err != nil {
-		slog.Warn("could not read kubeconfig contexts", "error", err)
-	}
-	if currentCtx == "" && len(contexts) > 0 {
-		currentCtx = contexts[0]
+func Run(ctx context.Context, initialClient client.Client, namespace string, initialContext string, port int) error {
+	if initialContext == "" {
+		_, initialContext, _ = listKubeContexts()
 	}
 
-	st := &state{k8sClient: initialClient, namespace: namespace, context: currentCtx}
+	st := &state{k8sClient: initialClient, namespace: namespace, context: initialContext}
 	b := newBroker()
 	mux := http.NewServeMux()
 
@@ -61,7 +57,12 @@ func Run(ctx context.Context, initialClient client.Client, namespace string, por
 			http.NotFound(w, r)
 			return
 		}
-		data, _ := staticFiles.ReadFile("assets/index.html")
+		data, err := staticFiles.ReadFile("assets/index.html")
+		if err != nil {
+			slog.Error("failed to read embedded UI asset", "path", "assets/index.html", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(data)
 	})
@@ -160,7 +161,7 @@ func Run(ctx context.Context, initialClient client.Client, namespace string, por
 
 	mux.HandleFunc("GET /api/events", b.ServeSSE)
 
-	addr := fmt.Sprintf(":%d", port)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
