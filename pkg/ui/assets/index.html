@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>kube-tf-reconciler</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+  </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen font-sans antialiased"
+      x-data="app()" x-cloak>
+
+  <!-- Navbar -->
+  <nav class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center gap-4 sticky top-0 z-10">
+    <span class="font-bold tracking-tight text-white shrink-0">kube-tf-reconciler</span>
+
+    <!-- Context selector -->
+    <div class="flex items-center gap-2 text-sm">
+      <label class="text-gray-500 shrink-0">Context</label>
+      <select
+        x-model="selectedContext"
+        @change="onContextChange()"
+        class="bg-gray-800 border border-gray-700 text-gray-200 text-sm rounded px-2 py-1 focus:outline-none focus:border-indigo-500 min-w-[160px] max-w-[280px]"
+      >
+        <template x-for="ctx in contexts" :key="ctx">
+          <option :value="ctx" x-text="ctx"></option>
+        </template>
+      </select>
+    </div>
+
+    <!-- Namespace selector -->
+    <div class="flex items-center gap-2 text-sm">
+      <label class="text-gray-500 shrink-0">Namespace</label>
+      <select
+        x-model="selectedNamespace"
+        @change="onNamespaceChange()"
+        class="bg-gray-800 border border-gray-700 text-gray-200 text-sm rounded px-2 py-1 focus:outline-none focus:border-indigo-500 min-w-[140px] max-w-[240px]"
+      >
+        <option value="">all namespaces</option>
+        <template x-for="ns in namespaces" :key="ns">
+          <option :value="ns" x-text="ns"></option>
+        </template>
+      </select>
+    </div>
+
+    <div class="ml-auto flex items-center gap-2 text-sm">
+      <span class="relative flex h-2 w-2">
+        <span
+          class="absolute inline-flex h-full w-full rounded-full opacity-75"
+          :class="liveConnected ? 'animate-ping bg-green-400' : 'bg-gray-600'"
+        ></span>
+        <span
+          class="relative inline-flex rounded-full h-2 w-2"
+          :class="liveConnected ? 'bg-green-400' : 'bg-gray-600'"
+        ></span>
+      </span>
+      <span :class="liveConnected ? 'text-green-400' : 'text-gray-500'">
+        <span x-text="liveConnected ? 'live' : 'reconnecting...'"></span>
+      </span>
+    </div>
+  </nav>
+
+  <!-- List View -->
+  <div x-show="!selectedWorkspace" class="w-full">
+    <div x-show="loading" class="p-8 text-gray-500">Loading workspaces...</div>
+
+    <div x-show="!loading">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-gray-800 text-gray-400 text-left">
+            <th class="px-6 py-3 font-medium">Name</th>
+            <th class="px-6 py-3 font-medium">Namespace</th>
+            <th class="px-6 py-3 font-medium">Phase</th>
+            <th class="px-6 py-3 font-medium">Changes</th>
+            <th class="px-6 py-3 font-medium">Age</th>
+            <th class="px-6 py-3 font-medium">Next Refresh</th>
+            <th class="px-6 py-3 font-medium">Last Error</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-if="workspaces.length === 0">
+            <tr>
+              <td colspan="7" class="text-center text-gray-500 py-12">No workspaces found.</td>
+            </tr>
+          </template>
+          <template x-for="ws in workspaces" :key="ws.namespace + '/' + ws.name">
+            <tr
+              class="border-b border-gray-700 hover:bg-gray-900 cursor-pointer transition-colors"
+              @click="selectWorkspace(ws)"
+            >
+              <td class="px-6 py-3 font-mono font-medium text-white" x-text="ws.name"></td>
+              <td class="px-6 py-3 text-gray-400" x-text="ws.namespace"></td>
+              <td class="px-6 py-3">
+                <span
+                  class="px-2 py-0.5 rounded-full text-xs font-semibold"
+                  :class="phaseBadgeClass(ws.terraformPhase)"
+                  x-text="ws.terraformPhase || '-'"
+                ></span>
+              </td>
+              <td class="px-6 py-3">
+                <span
+                  :class="ws.hasChanges ? 'text-yellow-400' : 'text-gray-500'"
+                  x-text="ws.hasChanges ? 'yes' : 'no'"
+                ></span>
+              </td>
+              <td class="px-6 py-3 text-gray-400" x-text="formatAge(ws.creationTimestamp)"></td>
+              <td class="px-6 py-3 text-gray-400" x-text="formatNextRefresh(ws.nextRefreshTimestamp)"></td>
+              <td class="px-6 py-3 text-red-400 text-xs truncate max-w-xs" x-text="ws.lastErrorMessage || '-'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Detail View -->
+  <div x-show="selectedWorkspace" class="p-6">
+
+    <!-- Header -->
+    <div class="mb-6 flex items-start gap-4">
+      <button
+        @click="goBack()"
+        class="text-gray-400 hover:text-white text-sm flex items-center gap-1 shrink-0 mt-0.5 transition-colors"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+        </svg>
+        Back
+      </button>
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-3 flex-wrap">
+          <h1
+            class="font-mono text-lg font-bold text-white"
+            x-text="selectedWorkspace ? selectedWorkspace.namespace + '/' + selectedWorkspace.name : ''"
+          ></h1>
+          <span
+            class="px-2 py-0.5 rounded-full text-xs font-semibold shrink-0"
+            :class="phaseBadgeClass(selectedWorkspace && selectedWorkspace.terraformPhase)"
+            x-text="selectedWorkspace && selectedWorkspace.terraformPhase || '-'"
+          ></span>
+        </div>
+        <p
+          class="text-gray-400 text-sm mt-1"
+          x-text="selectedWorkspace && selectedWorkspace.terraformMessage || ''"
+        ></p>
+      </div>
+    </div>
+
+    <!-- Tab Bar -->
+    <div class="flex border-b border-gray-800">
+      <button
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
+        :class="activeTab === 'overview' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        @click="activeTab = 'overview'"
+      >Overview</button>
+      <button
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
+        :class="activeTab === 'plans' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        @click="activeTab = 'plans'; ensurePlansLoaded()"
+      >Plans</button>
+      <button
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
+        :class="activeTab === 'planOutput' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        @click="activeTab = 'planOutput'"
+      >Plan Output</button>
+      <button
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
+        :class="activeTab === 'applyOutput' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        @click="activeTab = 'applyOutput'"
+      >Apply Output</button>
+      <button
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
+        :class="activeTab === 'initOutput' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        @click="activeTab = 'initOutput'"
+      >Init Output</button>
+      <button
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
+        :class="activeTab === 'currentRender' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        @click="activeTab = 'currentRender'"
+      >Current Render</button>
+    </div>
+
+    <!-- Loading Detail -->
+    <p x-show="!detail" class="text-gray-500 mt-8">Loading...</p>
+
+    <!-- Tab Content -->
+    <div x-show="detail" class="mt-6">
+
+      <!-- Overview Tab -->
+      <div x-show="activeTab === 'overview'">
+        <dl class="grid grid-cols-[max-content_1fr] gap-x-8 gap-y-3 max-w-2xl text-sm">
+
+          <dt class="text-gray-400 self-center">Phase</dt>
+          <dd>
+            <span
+              class="px-2 py-0.5 rounded-full text-xs font-semibold"
+              :class="phaseBadgeClass(detail && detail.terraformPhase)"
+              x-text="detail && detail.terraformPhase || '-'"
+            ></span>
+          </dd>
+
+          <dt class="text-gray-400 self-center">Message</dt>
+          <dd class="text-gray-200" x-text="detail && detail.terraformMessage || '-'"></dd>
+
+          <dt class="text-gray-400 self-center">Has Changes</dt>
+          <dd>
+            <span
+              :class="detail && detail.hasChanges ? 'text-yellow-400' : 'text-gray-500'"
+              x-text="detail && detail.hasChanges ? 'yes' : 'no'"
+            ></span>
+          </dd>
+
+          <dt class="text-gray-400 self-center">New Plan Needed</dt>
+          <dd>
+            <span
+              :class="detail && detail.newPlanNeeded ? 'text-yellow-400' : 'text-gray-500'"
+              x-text="detail && detail.newPlanNeeded ? 'yes' : 'no'"
+            ></span>
+          </dd>
+
+          <dt class="text-gray-400 self-center">New Apply Needed</dt>
+          <dd>
+            <span
+              :class="detail && detail.newApplyNeeded ? 'text-yellow-400' : 'text-gray-500'"
+              x-text="detail && detail.newApplyNeeded ? 'yes' : 'no'"
+            ></span>
+          </dd>
+
+          <dt class="text-gray-400 self-center">Retry Count</dt>
+          <dd class="text-gray-200" x-text="detail && detail.retryCount !== undefined ? detail.retryCount : '-'"></dd>
+
+          <dt class="text-gray-400 self-center">Last Error</dt>
+          <dd class="text-red-400" x-text="detail && detail.lastErrorMessage || '-'"></dd>
+
+          <dt class="text-gray-400 self-center">Last Error Time</dt>
+          <dd class="text-gray-400" x-text="detail && detail.lastErrorTime ? formatAge(detail.lastErrorTime) + ' ago' : '-'"></dd>
+
+          <dt class="text-gray-400 self-center">Last Execution</dt>
+          <dd class="text-gray-400" x-text="detail && detail.lastExecutionTime ? formatAge(detail.lastExecutionTime) + ' ago' : '-'"></dd>
+
+          <dt class="text-gray-400 self-center">Next Refresh</dt>
+          <dd class="text-gray-400" x-text="detail && formatNextRefresh(detail.nextRefreshTimestamp)"></dd>
+
+          <dt class="text-gray-400 self-center">Terraform Version</dt>
+          <dd class="font-mono text-gray-200" x-text="detail && detail.terraformVersion || '-'"></dd>
+
+          <dt class="text-gray-400 self-center">Auto Apply</dt>
+          <dd>
+            <span
+              :class="detail && detail.autoApply ? 'text-green-400' : 'text-gray-500'"
+              x-text="detail && detail.autoApply ? 'yes' : 'no'"
+            ></span>
+          </dd>
+
+          <dt class="text-gray-400 self-center">Destroy</dt>
+          <dd class="text-gray-200" x-text="detail && detail.destroy !== undefined ? String(detail.destroy) : '-'"></dd>
+
+        </dl>
+      </div>
+
+      <!-- Plans Tab -->
+      <div x-show="activeTab === 'plans'">
+
+        <!-- Plan detail drilldown -->
+        <template x-if="selectedPlan">
+          <div>
+            <button
+              @click="selectedPlan = null"
+              class="flex items-center gap-1 text-sm text-gray-400 hover:text-white transition-colors mb-4"
+            >
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+              </svg>
+              All plans
+            </button>
+
+            <dl class="grid grid-cols-[max-content_1fr] gap-x-8 gap-y-3 max-w-2xl text-sm mb-6">
+
+              <dt class="text-gray-400 self-center">Name</dt>
+              <dd class="font-mono text-gray-200" x-text="selectedPlan.name"></dd>
+
+              <dt class="text-gray-400 self-center">Phase</dt>
+              <dd>
+                <span
+                  class="px-2 py-0.5 rounded-full text-xs font-semibold"
+                  :class="phaseBadgeClass(selectedPlan.phase)"
+                  x-text="selectedPlan.phase || '-'"
+                ></span>
+              </dd>
+
+              <dt class="text-gray-400 self-center">Has Changes</dt>
+              <dd>
+                <span
+                  :class="selectedPlan.hasChanges ? 'text-yellow-400' : 'text-gray-500'"
+                  x-text="selectedPlan.hasChanges ? 'yes' : 'no'"
+                ></span>
+              </dd>
+
+              <dt class="text-gray-400 self-center">Start Time</dt>
+              <dd class="text-gray-400" x-text="selectedPlan.startTime || '-'"></dd>
+
+              <dt class="text-gray-400 self-center">Completion Time</dt>
+              <dd class="text-gray-400" x-text="selectedPlan.completionTime || '-'"></dd>
+
+              <dt class="text-gray-400 self-center">Message</dt>
+              <dd class="text-gray-200" x-text="selectedPlan.message || '-'"></dd>
+
+            </dl>
+
+            <template x-if="selectedPlan.planOutput">
+              <div class="mb-4">
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Plan Output</h3>
+                <div class="h-72 overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
+                  <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="selectedPlan.planOutput"></pre>
+                </div>
+              </div>
+            </template>
+
+            <template x-if="selectedPlan.applyOutput">
+              <div>
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Apply Output</h3>
+                <div class="h-72 overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
+                  <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="selectedPlan.applyOutput"></pre>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Plan list -->
+        <template x-if="!selectedPlan">
+          <div>
+            <template x-if="plansLoading">
+              <p class="text-gray-500 text-sm">Loading plans...</p>
+            </template>
+            <template x-if="!plansLoading && plans.length === 0">
+              <p class="text-gray-500 text-sm">No plans found.</p>
+            </template>
+            <template x-if="!plansLoading && plans.length > 0">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="border-b border-gray-800 text-gray-400 text-left">
+                    <th class="py-2 pr-6 font-medium">Name</th>
+                    <th class="py-2 pr-6 font-medium">Phase</th>
+                    <th class="py-2 pr-6 font-medium">Changes</th>
+                    <th class="py-2 pr-6 font-medium">Started</th>
+                    <th class="py-2 pr-6 font-medium">Completed</th>
+                    <th class="py-2 font-medium">Message</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="plan in plans" :key="plan.name">
+                    <tr
+                      class="border-b border-gray-800 hover:bg-gray-900 cursor-pointer transition-colors"
+                      @click="selectedPlan = plan"
+                    >
+                      <td class="py-2 pr-6 font-mono text-white" x-text="plan.name"></td>
+                      <td class="py-2 pr-6">
+                        <span
+                          class="px-2 py-0.5 rounded-full text-xs font-semibold"
+                          :class="phaseBadgeClass(plan.phase)"
+                          x-text="plan.phase || '-'"
+                        ></span>
+                        <span x-show="detail && detail.plan && detail.plan.name === plan.name" class="ml-2 text-xs text-indigo-400">current</span>
+                      </td>
+                      <td class="py-2 pr-6">
+                        <span :class="plan.hasChanges ? 'text-yellow-400' : 'text-gray-500'" x-text="plan.hasChanges ? 'yes' : 'no'"></span>
+                      </td>
+                      <td class="py-2 pr-6 text-gray-400 text-xs" x-text="plan.startTime ? formatAge(plan.startTime) + ' ago' : '-'"></td>
+                      <td class="py-2 pr-6 text-gray-400 text-xs" x-text="plan.completionTime ? formatAge(plan.completionTime) + ' ago' : '-'"></td>
+                      <td class="py-2 text-gray-400 text-xs truncate max-w-xs" x-text="plan.message || '-'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </template>
+          </div>
+        </template>
+
+      </div>
+
+      <!-- Plan Output Tab -->
+      <div x-show="activeTab === 'planOutput'">
+        <template x-if="detail && !['Planning', 'Applying'].includes(detail.terraformPhase)">
+          <p class="text-xs text-gray-500 mb-3">Last captured output — live during Planning or Applying phase.</p>
+        </template>
+        <div class="h-[calc(100vh-320px)] overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="detail && (detail.lastPlanOutput || (detail.plan && detail.plan.planOutput)) || '(no output)'"></pre>
+        </div>
+      </div>
+
+      <!-- Apply Output Tab -->
+      <div x-show="activeTab === 'applyOutput'">
+        <template x-if="detail && !['Planning', 'Applying'].includes(detail.terraformPhase)">
+          <p class="text-xs text-gray-500 mb-3">Last captured output — live during Planning or Applying phase.</p>
+        </template>
+        <div class="h-[calc(100vh-320px)] overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="detail && (detail.lastApplyOutput || (detail.plan && detail.plan.applyOutput)) || '(no output)'"></pre>
+        </div>
+      </div>
+
+      <!-- Init Output Tab -->
+      <div x-show="activeTab === 'initOutput'" class="h-[calc(100vh-320px)] overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="detail && detail.initOutput || '(no output)'"></pre>
+      </div>
+
+      <!-- Current Render Tab -->
+      <div x-show="activeTab === 'currentRender'" class="h-[calc(100vh-320px)] overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="detail && detail.currentRender || '(no output)'"></pre>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    function app() {
+      return {
+        workspaces: [],
+        selectedWorkspace: null,
+        detail: null,
+        activeTab: 'overview',
+        loading: true,
+        liveConnected: false,
+
+        plans: [],
+        plansLoading: false,
+        selectedPlan: null,
+
+        contexts: [],
+        namespaces: [],
+        selectedContext: '',
+        selectedNamespace: '',
+
+        init() {
+          this.fetchContexts();
+          this.fetchNamespaces();
+          this.fetchWorkspaceList();
+          this.connectSSE();
+        },
+
+        fetchContexts() {
+          fetch('/api/contexts')
+            .then(r => r.json())
+            .then(data => {
+              this.contexts = data.contexts || [];
+              this.selectedContext = data.current || '';
+            })
+            .catch(() => {});
+        },
+
+        fetchNamespaces() {
+          fetch('/api/namespaces')
+            .then(r => r.json())
+            .then(data => {
+              this.namespaces = data.namespaces || [];
+              this.selectedNamespace = data.current || '';
+            })
+            .catch(() => {});
+        },
+
+        onContextChange() {
+          this.postSwitch(this.selectedContext, this.selectedNamespace);
+        },
+
+        onNamespaceChange() {
+          this.postSwitch(this.selectedContext, this.selectedNamespace);
+        },
+
+        postSwitch(context, namespace) {
+          this.loading = true;
+          this.selectedWorkspace = null;
+          this.detail = null;
+          this.workspaces = [];
+          fetch('/api/switch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ context, namespace }),
+          })
+            .then(() => {
+              this.fetchNamespaces();
+              this.fetchWorkspaceList();
+            })
+            .catch(() => { this.loading = false; });
+        },
+
+        connectSSE() {
+          const es = new EventSource('/api/events');
+          es.onopen = () => { this.liveConnected = true; };
+          es.onerror = () => { this.liveConnected = false; };
+          es.onmessage = (e) => {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'workspaces') {
+              this.workspaces = msg.workspaces;
+              this.loading = false;
+              if (this.selectedWorkspace) {
+                this.fetchDetail(this.selectedWorkspace.namespace, this.selectedWorkspace.name);
+              }
+            }
+          };
+        },
+
+        fetchWorkspaceList() {
+          fetch('/api/workspaces')
+            .then(r => r.json())
+            .then(data => {
+              this.workspaces = data;
+              this.loading = false;
+            })
+            .catch(() => {
+              this.loading = false;
+            });
+        },
+
+        fetchDetail(namespace, name) {
+          fetch(`/api/workspaces/${namespace}/${name}`)
+            .then(r => r.json())
+            .then(data => {
+              this.detail = data;
+            })
+            .catch(() => {});
+        },
+
+        selectWorkspace(ws) {
+          this.selectedWorkspace = ws;
+          this.activeTab = 'overview';
+          this.detail = null;
+          this.plans = [];
+          this.selectedPlan = null;
+          this.fetchDetail(ws.namespace, ws.name);
+        },
+
+        goBack() {
+          this.selectedWorkspace = null;
+          this.detail = null;
+          this.plans = [];
+          this.selectedPlan = null;
+        },
+
+        ensurePlansLoaded() {
+          if (this.plans.length > 0 || this.plansLoading || !this.selectedWorkspace) return;
+          this.plansLoading = true;
+          fetch(`/api/workspaces/${this.selectedWorkspace.namespace}/${this.selectedWorkspace.name}/plans`)
+            .then(r => r.json())
+            .then(data => { this.plans = data; this.plansLoading = false; })
+            .catch(() => { this.plansLoading = false; });
+        },
+
+        phaseBadgeClass(phase) {
+          switch (phase) {
+            case 'Completed':
+              return 'bg-green-900 text-green-300';
+            case 'Planning':
+            case 'Applying':
+            case 'Initializing':
+              return 'bg-yellow-900 text-yellow-300';
+            case 'Errored':
+              return 'bg-red-900 text-red-300';
+            default:
+              return 'bg-gray-800 text-gray-400';
+          }
+        },
+
+        formatAge(iso) {
+          if (!iso) return '-';
+          const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+          if (diff < 0) return '-';
+          if (diff < 60) return `${diff}s`;
+          if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+          if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+          return `${Math.floor(diff / 86400)}d`;
+        },
+
+        formatNextRefresh(iso) {
+          if (!iso) return '-';
+          const diff = Math.floor((new Date(iso).getTime() - Date.now()) / 1000);
+          if (diff <= 0) return 'now';
+          if (diff < 60) return `${diff}s`;
+          if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+          return `${Math.floor(diff / 3600)}h`;
+        },
+      };
+    }
+  </script>
+</body>
+</html>
