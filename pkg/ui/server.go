@@ -164,6 +164,31 @@ func Run(ctx context.Context, initialClient client.Client, namespace string, ini
 		writeJSON(w, detail)
 	})
 
+	mux.HandleFunc("POST /api/workspaces/{namespace}/{name}/annotations", func(w http.ResponseWriter, r *http.Request) {
+		k8sClient, _, _ := st.get()
+		ns := r.PathValue("namespace")
+		name := r.PathValue("name")
+		var req struct {
+			Annotation string `json:"annotation"`
+			Value      string `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if !allowedAnnotations[req.Annotation] {
+			http.Error(w, "unsupported annotation", http.StatusBadRequest)
+			return
+		}
+		ctx2, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		if err := patchWorkspaceAnnotation(ctx2, k8sClient, ns, name, req.Annotation, req.Value); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	mux.HandleFunc("GET /api/events", b.ServeSSE)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)

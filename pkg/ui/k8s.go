@@ -70,17 +70,19 @@ type WorkspaceSummary struct {
 
 type WorkspaceDetail struct {
 	WorkspaceSummary
-	TerraformVersion  string       `json:"terraformVersion"`
-	AutoApply         bool         `json:"autoApply"`
-	Destroy           string       `json:"destroy"`
-	LastPlanOutput    string       `json:"lastPlanOutput"`
-	LastApplyOutput   string       `json:"lastApplyOutput"`
-	CurrentRender     string       `json:"currentRender"`
-	InitOutput        string       `json:"initOutput"`
-	RetryCount        int32        `json:"retryCount"`
-	LastErrorTime     string       `json:"lastErrorTime"`
-	LastExecutionTime string       `json:"lastExecutionTime"`
-	Plan              *PlanSummary `json:"plan,omitempty"`
+	TerraformVersion       string       `json:"terraformVersion"`
+	AutoApply              bool         `json:"autoApply"`
+	Destroy                string       `json:"destroy"`
+	LastPlanOutput         string       `json:"lastPlanOutput"`
+	LastApplyOutput        string       `json:"lastApplyOutput"`
+	CurrentRender          string       `json:"currentRender"`
+	InitOutput             string       `json:"initOutput"`
+	RetryCount             int32        `json:"retryCount"`
+	LastErrorTime          string       `json:"lastErrorTime"`
+	LastExecutionTime      string       `json:"lastExecutionTime"`
+	HasManualApplyAnnotation   bool       `json:"hasManualApplyAnnotation"`
+	HasManualDestroyAnnotation bool       `json:"hasManualDestroyAnnotation"`
+	Plan                   *PlanSummary `json:"plan,omitempty"`
 }
 
 type PlanSummary struct {
@@ -171,6 +173,29 @@ func listWorkspacePlans(ctx context.Context, k8sClient client.Client, namespace,
 	return summaries, nil
 }
 
+var allowedAnnotations = map[string]bool{
+	v1alpha1.ManualApplyAnnotation:   true,
+	v1alpha1.ManualDestroyAnnotation: true,
+}
+
+// patchWorkspaceAnnotation sets or removes an annotation on a workspace.
+// Pass value="true" to set it, value="" to remove it.
+func patchWorkspaceAnnotation(ctx context.Context, k8sClient client.Client, namespace, name, annotation, value string) error {
+	var patch []byte
+	if value != "" {
+		patch = []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, annotation, value))
+	} else {
+		patch = []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, annotation))
+	}
+	var ws v1alpha1.Workspace
+	ws.Name = name
+	ws.Namespace = namespace
+	if err := k8sClient.Patch(ctx, &ws, client.RawPatch(types.MergePatchType, patch)); err != nil {
+		return fmt.Errorf("patching workspace %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
+
 func fetchWorkspaceDetail(ctx context.Context, k8sClient client.Client, namespace, name string) (*WorkspaceDetail, error) {
 	var ws v1alpha1.Workspace
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &ws); err != nil {
@@ -197,9 +222,11 @@ func fetchWorkspaceDetail(ctx context.Context, k8sClient client.Client, namespac
 		LastApplyOutput:   ws.Status.LastApplyOutput,
 		CurrentRender:     ws.Status.CurrentRender,
 		InitOutput:        ws.Status.InitOutput,
-		RetryCount:        ws.Status.Backoff.RetryCount,
-		LastErrorTime:     timeStr(ws.Status.LastErrorTime),
-		LastExecutionTime: timeStr(ws.Status.LastExecutionTime),
+		RetryCount:               ws.Status.Backoff.RetryCount,
+		LastErrorTime:            timeStr(ws.Status.LastErrorTime),
+		LastExecutionTime:        timeStr(ws.Status.LastExecutionTime),
+		HasManualApplyAnnotation:   ws.Annotations[v1alpha1.ManualApplyAnnotation] == "true",
+		HasManualDestroyAnnotation: ws.Annotations[v1alpha1.ManualDestroyAnnotation] == "true",
 	}
 
 	if ws.Status.CurrentPlan != nil {
