@@ -68,6 +68,25 @@
     <div x-show="loading" class="p-8 text-gray-500">Loading workspaces...</div>
 
     <div x-show="!loading">
+      <!-- Phase filter bar -->
+      <div class="flex items-center gap-2 px-6 py-3 border-b border-gray-800 flex-wrap">
+        <button
+          @click="filterPhase = ''"
+          class="px-3 py-1 rounded-full text-xs font-medium transition-colors"
+          :class="filterPhase === '' ? 'bg-gray-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'"
+        >All <span x-text="'(' + workspaces.length + ')'"></span></button>
+        <template x-for="phase in availablePhases()" :key="phase">
+          <button
+            @click="filterPhase = (filterPhase === phase ? '' : phase)"
+            class="px-3 py-1 rounded-full text-xs font-semibold transition-colors ring-1"
+            :class="filterPhase === phase
+              ? phaseBadgeClass(phase) + ' ring-white/30'
+              : phaseBadgeClass(phase) + ' opacity-50 hover:opacity-100 ring-transparent'"
+            x-text="phase + ' (' + workspaces.filter(w => w.terraformPhase === phase).length + ')'"
+          ></button>
+        </template>
+      </div>
+
       <table class="w-full text-sm">
         <thead>
           <tr class="border-b border-gray-800 text-gray-400 text-left">
@@ -81,12 +100,12 @@
           </tr>
         </thead>
         <tbody>
-          <template x-if="workspaces.length === 0">
+          <template x-if="workspaces.filter(w => !filterPhase || w.terraformPhase === filterPhase).length === 0">
             <tr>
-              <td colspan="7" class="text-center text-gray-500 py-12">No workspaces found.</td>
+              <td colspan="7" class="text-center text-gray-500 py-12" x-text="filterPhase ? 'No workspaces in ' + filterPhase + ' phase.' : 'No workspaces found.'"></td>
             </tr>
           </template>
-          <template x-for="ws in workspaces" :key="ws.namespace + '/' + ws.name">
+          <template x-for="ws in workspaces.filter(w => !filterPhase || w.terraformPhase === filterPhase)" :key="ws.namespace + '/' + ws.name">
             <tr
               class="border-b border-gray-700 hover:bg-gray-900 cursor-pointer transition-colors"
               @click="selectWorkspace(ws)"
@@ -419,6 +438,7 @@
     function app() {
       return {
         workspaces: [],
+        filterPhase: '',
         selectedWorkspace: null,
         detail: null,
         activeTab: 'overview',
@@ -546,6 +566,12 @@
             .then(r => r.json())
             .then(data => { this.plans = data; this.plansLoading = false; })
             .catch(() => { this.plansLoading = false; });
+        },
+
+        availablePhases() {
+          const order = ['Completed', 'Planning', 'Applying', 'Initializing', 'Errored'];
+          const present = new Set(this.workspaces.map(w => w.terraformPhase).filter(Boolean));
+          return order.filter(p => present.has(p));
         },
 
         phaseBadgeClass(phase) {
