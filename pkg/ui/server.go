@@ -45,7 +45,12 @@ func (s *state) set(k8sClient client.Client, namespace, context string) {
 
 func Run(ctx context.Context, initialClient client.Client, namespace string, initialContext string, port int) error {
 	if initialContext == "" {
-		_, initialContext, _ = listKubeContexts()
+		_, currentContext, err := listKubeContexts()
+		if err != nil {
+			slog.Error("failed to derive initial kube context", "error", err)
+		} else {
+			initialContext = currentContext
+		}
 	}
 
 	st := &state{k8sClient: initialClient, namespace: namespace, context: initialContext}
