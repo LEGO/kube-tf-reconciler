@@ -499,11 +499,19 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ context, namespace }),
           })
-            .then(() => {
+            .then((response) => {
+              if (!response.ok) {
+                return response.text().then((text) => {
+                  throw new Error(text || `Switch failed with status ${response.status}`);
+                });
+              }
               this.fetchNamespaces();
               this.fetchWorkspaceList();
             })
-            .catch(() => { this.loading = false; });
+            .catch((error) => {
+              console.error(error);
+              this.loading = false;
+            });
         },
 
         connectSSE() {
