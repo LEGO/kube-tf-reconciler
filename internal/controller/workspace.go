@@ -150,9 +150,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
-		// If the resource has changed (new generation), skip the backoff and reset the counter
-		// to give the user rapid feedback when they are trying to resolve an issue.
-		if ws.Status.ObservedGeneration != ws.Generation {
+		// If the resource has been successfully reconciled before (ObservedGeneration > 0) and
+		// the user has made a spec change since then (Generation > ObservedGeneration), skip the
+		// backoff and reset the counter to give the user rapid feedback when they are trying to
+		// resolve an issue. We require ObservedGeneration > 0 so that backoff still applies to
+		// workspaces that have never been successfully reconciled (e.g., first-time failures).
+		if ws.Status.ObservedGeneration > 0 && ws.Status.ObservedGeneration < ws.Generation {
 			slog.InfoContext(ctx, "resource changed, resetting backoff", "workspace", req.String())
 			old := ws.DeepCopy()
 			ws.Status.Backoff.NextRetryTime = nil

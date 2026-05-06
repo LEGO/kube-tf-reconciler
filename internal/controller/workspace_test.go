@@ -753,7 +753,7 @@ func TestBackoffBehaviour(t *testing.T) {
 		RetryCount:    3,
 	}
 
-	// Workspace with a pending backoff but a newer generation (user made a change)
+	// Workspace with a pending backoff but a newer generation (user made a change after a prior success)
 	changedWs := newWs("test-backoff-changed", "unused")
 	changedWs.Generation = 3
 	changedWs.Status.ObservedGeneration = 2
@@ -762,10 +762,20 @@ func TestBackoffBehaviour(t *testing.T) {
 		RetryCount:    3,
 	}
 
+	// Workspace that has never been successfully reconciled (ObservedGeneration=0) and is in backoff.
+	// This represents a first-time failure — backoff should still apply here.
+	neverReconciledWs := newWs("test-backoff-never-reconciled", "unused")
+	neverReconciledWs.Generation = 1
+	neverReconciledWs.Status.ObservedGeneration = 0
+	neverReconciledWs.Status.Backoff = tfv1alphav1.BackoffStatus{
+		NextRetryTime: &nextRetryTime,
+		RetryCount:    2,
+	}
+
 	fakeClient := clientfake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(unchangedWs, changedWs).
-		WithObjects(unchangedWs, changedWs).
+		WithStatusSubresource(unchangedWs, changedWs, neverReconciledWs).
+		WithObjects(unchangedWs, changedWs, neverReconciledWs).
 		Build()
 
 	rootDir := t.TempDir()
@@ -797,7 +807,7 @@ func TestBackoffBehaviour(t *testing.T) {
 		assert.NotNil(t, ws.Status.Backoff.NextRetryTime)
 	})
 
-	t.Run("skips backoff and resets counter when generation has changed", func(t *testing.T) {
+	t.Run("skips backoff and resets counter when generation has changed after a prior success", func(t *testing.T) {
 		// The reconcile will proceed past backoff (resetting its state) and eventually fail due
 		// to no real TF setup. The backoff will then be re-applied at count 0 (fresh start).
 		result, err := reconciler.Reconcile(t.Context(), reconcile.Request{
@@ -819,5 +829,26 @@ func TestBackoffBehaviour(t *testing.T) {
 		var ws tfv1alphav1.Workspace
 		require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{Namespace: changedWs.Namespace, Name: changedWs.Name}, &ws))
 		assert.Less(t, ws.Status.Backoff.RetryCount, int32(3), "expected backoff RetryCount to be reset when generation changes")
+	})
+
+	t.Run("applies backoff for workspace that has never been successfully reconciled", func(t *testing.T) {
+		// Even though Generation != ObservedGeneration (0), backoff must still apply because
+		// ObservedGeneration=0 means the workspace has never succeeded. We don't want to remove
+		// the exponential backoff on first-time failures.
+		result, err := reconciler.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: neverReconciledWs.Namespace,
+				Name:      neverReconciledWs.Name,
+			},
+		})
+
+		require.NoError(t, err)
+		assert.Greater(t, result.RequeueAfter, time.Duration(0), "expected backoff to apply for never-reconciled workspace")
+
+		// Verify backoff state is preserved
+		var ws tfv1alphav1.Workspace
+		require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{Namespace: neverReconciledWs.Namespace, Name: neverReconciledWs.Name}, &ws))
+		assert.Equal(t, int32(2), ws.Status.Backoff.RetryCount)
+		assert.NotNil(t, ws.Status.Backoff.NextRetryTime)
 	})
 }
