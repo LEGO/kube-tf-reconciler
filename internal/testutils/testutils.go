@@ -150,17 +150,33 @@ func GetSecret(c klient.Client, name, namespace string) (*corev1.Secret, error) 
 }
 
 func GetFirstFoundEnvTestBinaryDir() string {
+
+	// 1) Standard envtest convention (setup-envtest sets this)
+	if dir := os.Getenv("ENVTEST_ASSETS_DIR"); dir != "" {
+		if _, err := os.Stat(filepath.Join(dir, "etcd")); err == nil {
+			return dir
+		}
+		logf.Log.Info("ENVTEST_ASSETS_DIR is set but etcd not found there", "ENVTEST_ASSETS_DIR", dir)
+	}
+
+	// 2) Repo-local convention: ../../bin/k8s/<version>/
 	basePath := filepath.Join("..", "..", "bin", "k8s")
 	entries, err := os.ReadDir(basePath)
-	if err != nil {
-		logf.Log.Error(err, "Failed to read directory", "path", basePath)
-		return ""
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			return filepath.Join(basePath, entry.Name())
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				candidate := filepath.Join(basePath, entry.Name())
+				if _, err := os.Stat(filepath.Join(candidate, "etcd")); err == nil {
+					return candidate
+				}
+			}
 		}
+	} else {
+		logf.Log.Error(err, "Failed to read directory", "path", basePath)
 	}
+
+	// 3) Fall back: let envtest decide (will try default kubebuilder paths)
+	logf.Log.Info("envtest assets not found; set ENVTEST_ASSETS_DIR using setup-envtest", "basePath", basePath)
 	return ""
 }
 

@@ -63,9 +63,12 @@ func TestWorkspaceController(t *testing.T) {
 	err = coordinationv1.AddToScheme(testEnv.Scheme)
 	assert.NoError(t, err)
 
+	tfHome := t.TempDir()
+	t.Setenv("HOME", tfHome)
+
 	cfg, err := testEnv.Start()
-	assert.NoError(t, err)
-	assert.NotNil(t, cfg)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
 	k, err := klient.New(cfg)
 	assert.NoError(t, err)
 
@@ -559,6 +562,9 @@ resource "random_pet" "name" {
 	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
 	require.NoError(t, coordinationv1.AddToScheme(scheme))
 
+	tfHome := t.TempDir()
+	t.Setenv("HOME", tfHome)
+
 	freeWs := newWs("test-free", modHost.ModuleSource("my-module"))
 	lockedWs := newWs("test-locked", modHost.ModuleSource("my-module"))
 	expiredWs := newWs("test-expired", modHost.ModuleSource("my-module"))
@@ -733,5 +739,93 @@ resource "random_pet" "name" {
 			Namespace: freeWs.Namespace,
 		}, &plan)
 		assert.NoError(t, err)
+	})
+
+	t.Run("backoff gate", func(t *testing.T) {
+		t.Run("applies backoff when resource unchanged", func(t *testing.T) {
+			ws := newWs("test-backoff-unchanged", modHost.ModuleSource("my-module"))
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 1
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			res, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			// Should return due to backoff (rough bound to avoid flakes)
+			require.True(t, res.RequeueAfter > time.Minute)
+		})
+
+		t.Run("does not apply backoff when resource changed; clears backoff", func(t *testing.T) {
+			ws := newWs("test-backoff-changed", modHost.ModuleSource("my-module"))
+			ws.Generation = 2
+			ws.Status.ObservedGeneration = 1 // changed
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			// Force reconcile to exit at lease acquisition (no terraform)
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			_, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			// Backoff must be cleared in stored object
+			var wsAfter tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfter))
+
+			require.Equal(t, int32(0), wsAfter.Status.Backoff.RetryCount)
+			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
+		})
 	})
 }

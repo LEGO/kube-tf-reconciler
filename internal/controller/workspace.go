@@ -150,8 +150,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
-		slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
-		return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+		if ws.Generation != ws.Status.ObservedGeneration {
+			// Resource was changed by the user — clear backoff and proceed immediately
+			r.clearBackoff(ctx, ws)
+		} else {
+			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
+			return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+		}
 	}
 
 	// Attempt to acquire lease, if we don't get it, then we don't proceed
@@ -1305,6 +1310,15 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 	})
 
 	return outputCh, wg
+}
+
+func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
+	old := ws.DeepCopy()
+	ws.Status.Backoff.NextRetryTime = nil
+	ws.Status.Backoff.RetryCount = 0
+	if err := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old)); err != nil {
+		slog.ErrorContext(ctx, "failed to clear backoff status", "error", err.Error())
+	}
 }
 
 func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
