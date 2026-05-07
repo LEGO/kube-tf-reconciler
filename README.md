@@ -157,7 +157,6 @@ go generate ./...
 Running tests
 
 ```bash
-export ENVTEST_ASSETS_DIR="$(go tool setup-envtest use 1.32.0 --bin-dir bin/ -p path)"
 go test ./... -v
 ```
 

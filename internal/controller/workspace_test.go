@@ -776,8 +776,8 @@ resource "random_pet" "name" {
 
 		t.Run("does not apply backoff when resource changed; clears backoff", func(t *testing.T) {
 			ws := newWs("test-backoff-changed", modHost.ModuleSource("my-module"))
-			ws.Generation = 2
-			ws.Status.ObservedGeneration = 1 // changed
+			ws.Generation = 2 // changed
+			ws.Status.ObservedGeneration = 1
 			ws.Status.Backoff.RetryCount = 3
 			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
 			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
