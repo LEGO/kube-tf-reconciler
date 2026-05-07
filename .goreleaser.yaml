@@ -1,0 +1,76 @@
+version: 2
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    binary: krec
+    ldflags:
+      - -s -w -X github.com/LEGO/kube-tf-reconciler/cmd.version={{.Version}} -X github.com/LEGO/kube-tf-reconciler/cmd.commit={{.Commit}} -X github.com/LEGO/kube-tf-reconciler/cmd.date={{.Date}}
+  - id: win
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - windows
+    binary: krec
+    ldflags:
+      - -s -w -X github.com/LEGO/kube-tf-reconciler/cmd.version={{.Version}} -X github.com/LEGO/kube-tf-reconciler/cmd.commit={{.Commit}} -X github.com/LEGO/kube-tf-reconciler/cmd.date={{.Date}}
+    hooks:
+      post:
+        - >
+          osslsigncode sign
+            -readpass /tmp/pw
+            -t http://timestamp.digicert.com
+            -certs /tmp/cert.pem
+            -key /tmp/cert.key
+            -n "Kube TF Reconciler CLI"
+            -in {{ .Path }}
+            -out {{ trimsuffix .Path ".exe" }}-signed.exe
+        - mv {{ trimsuffix .Path ".exe" }}-signed.exe {{ .Path }}
+
+archives:
+  - formats: [tar.gz]
+    id: default
+    # this name template makes the OS and Arch compatible with the results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  disable: true
+
+changelog:
+  use: github-native
+
+brews:
+  - name: kube-tf-reconciler
+    homepage: "https://github.com/LEGO/kube-tf-reconciler"
+    description: "Kube TF Reconciler"
+    license: "MIT"
+
+    url_template: "https://github.com/LEGO/kube-tf-reconciler/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+    custom_require: "lib/gh-strategy"
+    download_strategy: GitHubPrivateRepositoryReleaseDownloadStrategy
+
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "chore(release): brew formula update for {{ .ProjectName }} version {{ .Tag }}"
+    repository:
+      owner: LEGO
+      name: homebrew-tap
+      git:
+        url: git@github.com:LEGO/homebrew-tap.git
+        private_key: '{{ .Env.GITHUB_BREW_PRIVATE_KEY_LEGO }}'
+    directory: Formula
+    skip_upload: auto
