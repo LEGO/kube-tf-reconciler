@@ -149,14 +149,33 @@ func GetSecret(c klient.Client, name, namespace string) (*corev1.Secret, error) 
 	return secret, err
 }
 
+func envtestBinaryMissing(dir, name string) bool {
+	_, err := os.Stat(filepath.Join(dir, name))
+	return err != nil
+}
+
+func isValidEnvtestAssetsDir(dir string) bool {
+	required := []string{"etcd", "kube-apiserver"}
+
+	for _, bin := range required {
+		if envtestBinaryMissing(dir, bin) {
+			return false
+		}
+	}
+	return true
+}
+
 func GetFirstFoundEnvTestBinaryDir() string {
 
-	// 1) Standard envtest convention (setup-envtest sets this)
+	// 1) Standard envtest convention (user/CI exports this)
 	if dir := os.Getenv("ENVTEST_ASSETS_DIR"); dir != "" {
-		if _, err := os.Stat(filepath.Join(dir, "etcd")); err == nil {
+		if isValidEnvtestAssetsDir(dir) {
 			return dir
 		}
-		logf.Log.Info("ENVTEST_ASSETS_DIR is set but etcd not found there", "ENVTEST_ASSETS_DIR", dir)
+		logf.Log.Info(
+			"ENVTEST_ASSETS_DIR is set but required envtest binaries were not found there",
+			"ENVTEST_ASSETS_DIR", dir,
+		)
 	}
 
 	// 2) Repo-local convention: ../../bin/k8s/<version>/
@@ -164,11 +183,13 @@ func GetFirstFoundEnvTestBinaryDir() string {
 	entries, err := os.ReadDir(basePath)
 	if err == nil {
 		for _, entry := range entries {
-			if entry.IsDir() {
-				candidate := filepath.Join(basePath, entry.Name())
-				if _, err := os.Stat(filepath.Join(candidate, "etcd")); err == nil {
-					return candidate
-				}
+			if !entry.IsDir() {
+				continue
+			}
+
+			candidate := filepath.Join(basePath, entry.Name())
+			if isValidEnvtestAssetsDir(candidate) {
+				return candidate
 			}
 		}
 	} else {
