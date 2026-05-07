@@ -66,6 +66,7 @@ type WorkspaceSummary struct {
 	CreationTimestamp    string `json:"creationTimestamp"`
 	NextRefreshTimestamp string `json:"nextRefreshTimestamp"`
 	LastErrorMessage     string `json:"lastErrorMessage"`
+	Deleting             bool   `json:"deleting"`
 }
 
 type WorkspaceDetail struct {
@@ -133,6 +134,7 @@ func fetchWorkspaces(ctx context.Context, k8sClient client.Client, namespace str
 			CreationTimestamp:    metaTimeStr(ws.CreationTimestamp),
 			NextRefreshTimestamp: metaTimeStr(ws.Status.NextRefreshTimestamp),
 			LastErrorMessage:     ws.Status.LastErrorMessage,
+			Deleting:             !ws.DeletionTimestamp.IsZero(),
 		})
 	}
 	sort.SliceStable(summaries, func(i, j int) bool {
@@ -214,6 +216,7 @@ func fetchWorkspaceDetail(ctx context.Context, k8sClient client.Client, namespac
 			CreationTimestamp:    metaTimeStr(ws.CreationTimestamp),
 			NextRefreshTimestamp: metaTimeStr(ws.Status.NextRefreshTimestamp),
 			LastErrorMessage:     ws.Status.LastErrorMessage,
+			Deleting:             !ws.DeletionTimestamp.IsZero(),
 		},
 		TerraformVersion:  ws.Spec.TerraformVersion,
 		AutoApply:         ws.Spec.AutoApply,

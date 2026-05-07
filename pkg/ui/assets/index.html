@@ -298,10 +298,10 @@
           <dt class="text-gray-400 self-center">Destroy</dt>
           <dd class="text-gray-200" x-text="detail && detail.destroy !== undefined ? String(detail.destroy) : '-'"></dd>
 
-          <template x-if="detail && (detail.hasManualDestroyAnnotation || detail.destroy === 'manual')">
+          <template x-if="detail && (detail.hasManualDestroyAnnotation || (detail.deleting && detail.destroy === 'manual'))">
             <dt class="text-gray-400 self-center">Manual Destroy</dt>
           </template>
-          <template x-if="detail && (detail.hasManualDestroyAnnotation || detail.destroy === 'manual')">
+          <template x-if="detail && (detail.hasManualDestroyAnnotation || (detail.deleting && detail.destroy === 'manual'))">
             <dd class="flex items-center gap-2">
               <template x-if="!detail.hasManualDestroyAnnotation">
                 <button
