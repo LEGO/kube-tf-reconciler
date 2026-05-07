@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -733,5 +734,188 @@ resource "random_pet" "name" {
 			Namespace: freeWs.Namespace,
 		}, &plan)
 		assert.NoError(t, err)
+	})
+}
+
+// TestBackoffBypassBehaviour verifies that the backoff is bypassed when the user
+// makes relevant changes (spec or metadata), but NOT bypassed for status-only updates.
+func TestBackoffBypassBehaviour(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
+
+	futureRetry := metav1.NewTime(time.Now().Add(10 * time.Minute))
+
+	newBackoffWs := func(name string) *tfv1alphav1.Workspace {
+		ws := newWs(name, "fake-source")
+		ws.Status = tfv1alphav1.WorkspaceStatus{
+			ObservedGeneration:   ws.Generation,
+			ObservedMetadataHash: computeMetadataHash(ws),
+			Backoff: tfv1alphav1.BackoffStatus{
+				NextRetryTime: &futureRetry,
+				RetryCount:    1,
+			},
+		}
+		return ws
+	}
+
+	newReconciler := func(t *testing.T, objs ...client.Object) (*WorkspaceReconciler, client.Client) {
+		t.Helper()
+		statusSubresource := make([]client.Object, len(objs))
+		copy(statusSubresource, objs)
+		fakeClient := clientfake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(statusSubresource...).
+			WithObjects(objs...).
+			Build()
+		rootDir := t.TempDir()
+		rec := &WorkspaceReconciler{
+			Client:   fakeClient,
+			Scheme:   scheme,
+			Recorder: record.NewFakeRecorder(32),
+			Tf:       runner.New(rootDir),
+			Renderer: render.NewFileRender(rootDir),
+			leases:   &sync.Map{},
+		}
+		return rec, fakeClient
+	}
+
+	t.Run("backoff applies when nothing changed", func(t *testing.T) {
+		ws := newBackoffWs("test-backoff-no-change")
+		reconciler, _ := newReconciler(t, ws)
+
+		result, err := reconciler.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+		})
+
+		require.NoError(t, err)
+		// Should requeue after the backoff time (no bypassing)
+		assert.Greater(t, result.RequeueAfter, time.Duration(0), "expected backoff requeue")
+	})
+
+	t.Run("backoff bypassed when manual apply annotation is toggled", func(t *testing.T) {
+		ws := newBackoffWs("test-backoff-manual-apply")
+		reconciler, fakeClient := newReconciler(t, ws)
+
+		// Add the manual apply annotation — metadata-only change that doesn't bump generation
+		updated := ws.DeepCopy()
+		updated.Annotations = map[string]string{
+			tfv1alphav1.ManualApplyAnnotation: "true",
+		}
+		require.NoError(t, fakeClient.Update(t.Context(), updated))
+
+		result, err := reconciler.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+		})
+
+		// Reconcile should have bypassed the backoff and proceeded (failing because of
+		// the fake module source, not because of the backoff gate).
+		// The distinguishing characteristic is that it does NOT return with a long RequeueAfter.
+		assert.False(t, err == nil && result.RequeueAfter > time.Minute,
+			"expected reconcile to bypass backoff (not return long requeue)")
+	})
+
+	t.Run("backoff bypassed when an arbitrary label changes", func(t *testing.T) {
+		ws := newBackoffWs("test-backoff-label-change")
+		reconciler, fakeClient := newReconciler(t, ws)
+
+		// Add a label — metadata-only change that doesn't bump generation
+		updated := ws.DeepCopy()
+		updated.Labels = map[string]string{
+			"env": "staging",
+		}
+		require.NoError(t, fakeClient.Update(t.Context(), updated))
+
+		result, err := reconciler.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+		})
+
+		assert.False(t, err == nil && result.RequeueAfter > time.Minute,
+			"expected reconcile to bypass backoff (not return long requeue)")
+	})
+
+	t.Run("ignored annotation change (last-applied-configuration) does not bypass backoff", func(t *testing.T) {
+		ws := newBackoffWs("test-backoff-ignored-annotation")
+		reconciler, fakeClient := newReconciler(t, ws)
+
+		// Update only the ignored annotation — the hash must remain unchanged
+		updated := ws.DeepCopy()
+		updated.Annotations = map[string]string{
+			"kubectl.kubernetes.io/last-applied-configuration": `{"apiVersion":"v1"}`,
+		}
+		require.NoError(t, fakeClient.Update(t.Context(), updated))
+
+		result, err := reconciler.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+		})
+
+		require.NoError(t, err)
+		// Should still be backing off since only the ignored annotation changed
+		assert.Greater(t, result.RequeueAfter, time.Duration(0), "expected backoff requeue for ignored annotation change")
+	})
+
+	t.Run("backoff bypassed when spec generation changes", func(t *testing.T) {
+		ws := newBackoffWs("test-backoff-gen-change")
+		reconciler, fakeClient := newReconciler(t, ws)
+
+		// Simulate a generation bump by patching the status to an older observed generation
+		statusUpdated := ws.DeepCopy()
+		statusUpdated.Status.ObservedGeneration = ws.Generation - 1
+		require.NoError(t, fakeClient.Status().Update(t.Context(), statusUpdated))
+
+		result, err := reconciler.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+		})
+
+		assert.False(t, err == nil && result.RequeueAfter > time.Minute,
+			"expected reconcile to bypass backoff (not return long requeue)")
+	})
+}
+
+// TestComputeMetadataHash verifies that computeMetadataHash produces consistent,
+// order-independent hashes and correctly excludes ignored annotations.
+func TestComputeMetadataHash(t *testing.T) {
+	t.Run("identical metadata produces identical hash", func(t *testing.T) {
+		ws1 := newWs("ws1", "fake-source")
+		ws1.Labels = map[string]string{"a": "1", "b": "2"}
+		ws1.Annotations = map[string]string{"x": "y"}
+
+		ws2 := newWs("ws2", "fake-source")
+		ws2.Labels = map[string]string{"b": "2", "a": "1"} // different order
+		ws2.Annotations = map[string]string{"x": "y"}
+
+		assert.Equal(t, computeMetadataHash(ws1), computeMetadataHash(ws2))
+	})
+
+	t.Run("different labels produce different hashes", func(t *testing.T) {
+		ws1 := newWs("ws1", "fake-source")
+		ws1.Labels = map[string]string{"a": "1"}
+
+		ws2 := newWs("ws2", "fake-source")
+		ws2.Labels = map[string]string{"a": "2"}
+
+		assert.NotEqual(t, computeMetadataHash(ws1), computeMetadataHash(ws2))
+	})
+
+	t.Run("ignored annotation does not affect hash", func(t *testing.T) {
+		ws1 := newWs("ws1", "fake-source")
+		ws1.Annotations = map[string]string{"my-annotation": "val"}
+
+		ws2 := newWs("ws2", "fake-source")
+		ws2.Annotations = map[string]string{
+			"my-annotation": "val",
+			"kubectl.kubernetes.io/last-applied-configuration": `{"a":"b"}`,
+		}
+
+		assert.Equal(t, computeMetadataHash(ws1), computeMetadataHash(ws2))
+	})
+
+	t.Run("non-ignored annotation affects hash", func(t *testing.T) {
+		ws1 := newWs("ws1", "fake-source")
+		ws2 := newWs("ws2", "fake-source")
+		ws2.Annotations = map[string]string{"my-annotation": "val"}
+
+		assert.NotEqual(t, computeMetadataHash(ws1), computeMetadataHash(ws2))
 	})
 }

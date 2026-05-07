@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -100,16 +101,36 @@ func (TypedAnnotationChangedPredicate[object]) Update(e event.TypedUpdateEvent[o
 	newAnnotations := maps.Clone(e.ObjectNew.GetAnnotations())
 	oldAnnotations := maps.Clone(e.ObjectOld.GetAnnotations())
 
-	ignoreAnnotations := []string{
-		"kubectl.kubernetes.io/last-applied-configuration",
-	}
-
-	for _, annotation := range ignoreAnnotations {
+	for annotation := range ignoredAnnotations {
 		delete(newAnnotations, annotation)
 		delete(oldAnnotations, annotation)
 	}
 
 	return !maps.Equal(newAnnotations, oldAnnotations)
+}
+
+// ignoredAnnotations contains annotation keys that are excluded from the metadata hash
+// and from the AnnotationChangedPredicate. They must stay in sync.
+var ignoredAnnotations = map[string]struct{}{
+	"kubectl.kubernetes.io/last-applied-configuration": {},
+}
+
+// computeMetadataHash returns a stable hash of the workspace's labels and relevant
+// annotations (excluding ignoredAnnotations). It is used to detect metadata-only
+// changes that don't bump metadata.generation but should still bypass backoff.
+func computeMetadataHash(ws *tfv1alphav1.Workspace) string {
+	parts := make([]string, 0, len(ws.Labels)+len(ws.Annotations))
+	for k, v := range ws.Labels {
+		parts = append(parts, "l:"+k+"="+v)
+	}
+	for k, v := range ws.Annotations {
+		if _, ignored := ignoredAnnotations[k]; !ignored {
+			parts = append(parts, "a:"+k+"="+v)
+		}
+	}
+	sort.Strings(parts)
+	h := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return fmt.Sprintf("%x", h)
 }
 
 // WorkspaceReconciler reconciles a Workspace object
@@ -150,8 +171,17 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
-		slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
-		return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+		// Bypass backoff when the user has made a relevant change: either a spec change
+		// (bumps generation) or a metadata-only change (labels/annotations, which don't
+		// bump generation but do trigger reconcile via LabelChangedPredicate /
+		// AnnotationChangedPredicate).
+		if ws.Generation != ws.Status.ObservedGeneration || computeMetadataHash(ws) != ws.Status.ObservedMetadataHash {
+			// Resource was changed by the user — clear backoff and proceed immediately
+			r.clearBackoff(ctx, ws)
+		} else {
+			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
+			return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+		}
 	}
 
 	// Attempt to acquire lease, if we don't get it, then we don't proceed
@@ -170,7 +200,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}()
 
 	logf.IntoContext(ctx, log.WithValues("workspace", req.String()))
-	if ws.Status.ObservedGeneration == ws.Generation && time.Now().Before(ws.Status.NextRefreshTimestamp.Time) && !ws.ManualApplyRequested() {
+	if ws.Status.ObservedGeneration == ws.Generation && computeMetadataHash(ws) == ws.Status.ObservedMetadataHash && time.Now().Before(ws.Status.NextRefreshTimestamp.Time) && !ws.ManualApplyRequested() {
 		return ctrl.Result{RequeueAfter: time.Until(ws.Status.NextRefreshTimestamp.Time)}, nil
 	}
 
@@ -717,6 +747,7 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 
 		old = ws.DeepCopy()
 		ws.Status.ObservedGeneration = ws.Generation
+		ws.Status.ObservedMetadataHash = computeMetadataHash(ws)
 		ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(nextRefreshInterval))
 
 		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
@@ -1316,5 +1347,21 @@ func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Works
 	backoffErr := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	if backoffErr != nil {
 		slog.ErrorContext(ctx, "failed to update backoff status", "error", backoffErr.Error())
+	}
+}
+
+// clearBackoff resets the workspace's backoff status. It uses RetryOnConflict to
+// remain safe against concurrent status updates.
+func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+		old := ws.DeepCopy()
+		ws.Status.Backoff = tfv1alphav1.BackoffStatus{}
+		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to clear backoff status", "error", err.Error())
 	}
 }

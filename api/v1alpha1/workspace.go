@@ -245,6 +245,11 @@ type WorkspaceStatus struct {
 	// ObservedGeneration is the observed generation of the workspace
 	// +kubebuilder:validation:Optional
 	ObservedGeneration int64 `json:"observedGeneration"`
+	// ObservedMetadataHash is a hash of the workspace labels and relevant annotations
+	// at the time of the last successful reconcile. It is used to detect metadata-only
+	// changes (e.g. label or annotation updates) that do not bump metadata.generation.
+	// +kubebuilder:validation:Optional
+	ObservedMetadataHash string `json:"observedMetadataHash,omitempty"`
 
 	// NewPlanNeeded indicates whether a new plan is needed
 	// +kubebuilder:validation:Optional
