@@ -37,4 +37,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_BREW_PRIVATE_KEY_LEGO: ${{ secrets.BREW_PRIVATE_KEY_LEGO }}
+          GITHUB_BREW_PRIVATE_KEY: ${{ secrets.BREW_PRIVATE_KEY }}
