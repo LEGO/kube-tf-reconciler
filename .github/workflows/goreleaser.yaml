@@ -1,0 +1,40 @@
+name: Go
+on:
+  push:
+    tags:
+      - v*
+permissions:
+  contents: write
+jobs:
+  Release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install osslsigncode
+        run: sudo apt-get update && sudo apt-get install -y osslsigncode
+
+      - name: Prepare code signing certificate
+        run: |
+          echo "${{ secrets.WIN_SIGNING_CERT }}" > /tmp/cert.pem
+          echo "${{ secrets.WIN_SIGNING_PASSWORD }}" > /tmp/pw
+          echo "${{ secrets.WIN_SIGNING_PRIVATE_KEY }}" > /tmp/cert.key
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_BREW_PRIVATE_KEY_LEGO: ${{ secrets.BREW_PRIVATE_KEY_LEGO }}
