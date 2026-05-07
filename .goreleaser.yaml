@@ -46,25 +46,6 @@ archives:
       - goos: windows
         formats: [zip]
 
-scoops:
-  - name: kube-tf-reconciler
-    homepage: "https://github.com/LEGO/kube-tf-reconciler"
-    description: "Kube TF Reconciler"
-    url_template: "https://github.com/LEGO/kube-tf-reconciler/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
-    commit_author:
-      name: goreleaserbot
-      email: bot@goreleaser.com
-    commit_msg_template: "chore(release): Scoop update for {{ .ProjectName }} version {{ .Tag }}"
-    shortcuts: [["krec.exe","krec"]]
-    directory: bucket
-    repository:
-      owner: LEGO
-      name: ScoopBucket
-      branch: master
-      git:
-        url: git@github.com:LEGO/ScoopBucket.git
-        private_key: '{{ .Env.SCOOP_PRIVATE_KEY }}'
-
 checksum:
   disable: true
 
