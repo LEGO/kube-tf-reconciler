@@ -22,7 +22,7 @@ builds:
         - >
           osslsigncode sign
             -readpass /tmp/pw
-            -t http://timestamp.digicert.com
+            -t https://timestamp.digicert.com
             -certs /tmp/cert.pem
             -key /tmp/cert.key
             -n "Kube TF Reconciler CLI"
