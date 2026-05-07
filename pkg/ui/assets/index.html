@@ -178,13 +178,13 @@
           ></h1>
           <span
             class="px-2 py-0.5 rounded-full text-xs font-semibold shrink-0"
-            :class="phaseBadgeClass(selectedWorkspace && selectedWorkspace.terraformPhase)"
-            x-text="selectedWorkspace && selectedWorkspace.terraformPhase || '-'"
+            :class="phaseBadgeClass(detail ? detail.terraformPhase : (selectedWorkspace && selectedWorkspace.terraformPhase))"
+            x-text="(detail ? detail.terraformPhase : (selectedWorkspace && selectedWorkspace.terraformPhase)) || '-'"
           ></span>
         </div>
         <p
           class="text-gray-400 text-sm mt-1"
-          x-text="selectedWorkspace && selectedWorkspace.terraformMessage || ''"
+          x-text="(detail ? detail.terraformMessage : (selectedWorkspace && selectedWorkspace.terraformMessage)) || ''"
         ></p>
       </div>
     </div>
