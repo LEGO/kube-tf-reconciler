@@ -15,9 +15,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Git Credentials
-        run: git config --global url."https://${{ secrets.LEGO_GITHUB_PACKAGE_REGISTRY_TOKEN }}@github".insteadOf https://github
-
       - name: Install osslsigncode
         run: sudo apt-get update && sudo apt-get install -y osslsigncode
 
