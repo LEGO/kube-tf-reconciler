@@ -1313,10 +1313,23 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 }
 
 func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
-	old := ws.DeepCopy()
-	ws.Status.Backoff.NextRetryTime = nil
-	ws.Status.Backoff.RetryCount = 0
-	if err := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old)); err != nil {
+	key := types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &tfv1alphav1.Workspace{}
+		if err := r.Client.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		old := latest.DeepCopy()
+		latest.Status.Backoff.NextRetryTime = nil
+		latest.Status.Backoff.RetryCount = 0
+		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
+			return err
+		}
+		ws.Status.Backoff.NextRetryTime = latest.Status.Backoff.NextRetryTime
+		ws.Status.Backoff.RetryCount = latest.Status.Backoff.RetryCount
+		return nil
+	})
+	if err != nil {
 		slog.ErrorContext(ctx, "failed to clear backoff status", "error", err.Error())
 	}
 }
