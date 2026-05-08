@@ -200,6 +200,48 @@ kubectl port-forward -n krec-debug svc/krec-debug 2345:2345
 - For GoLand: Set up a Go Remote configuration targeting localhost:2345
 - For Delve CLI: dlv connect localhost:2345
 
+## Nix
+
+A Nix flake is provided for reproducible builds and a dev shell.
+
+Run it directly without installing:
+
+```sh
+nix run github:LEGO/kube-tf-reconciler -- help
+
+# OR from the local directory
+
+nix run .#krec -- help
+```
+
+Build the `krec` binary (output at `./result/bin/krec`):
+
+```sh
+nix build .#krec
+```
+
+Enter a development shell preloaded with required tools:
+
+```sh
+nix develop
+```
+
+### Updating vendorHash
+
+The flake pins Go module dependencies via `vendorHash` in `flake.nix`. It
+needs refreshing on the initial clone and after any change to `go.mod` or
+`go.sum`.
+
+Run the build and read the mismatch from the error output:
+
+```sh
+nix build .#krec
+```
+
+The build fails with a line like `got: sha256-...=`. Copy that SRI string
+into `flake.nix`, replacing the old hash on the `vendorHash` line, then
+re-run `nix build .#krec`.
+
 ## License
 
 This project is licensed under Apache License 2.0. See the [LICENSE](LICENSE)
