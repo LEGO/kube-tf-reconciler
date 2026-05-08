@@ -44,6 +44,10 @@
           "-X github.com/LEGO/kube-tf-reconciler/cmd.date=${self.lastModifiedDate or "19700101000000"}"
         ];
 
+        postInstall = ''
+          mv $out/bin/kube-tf-reconciler $out/bin/krec
+        '';
+
         meta = {
           description = "Kubernetes operator for managing infrastructure as code using Terraform";
           homepage = "https://github.com/LEGO/kube-tf-reconciler";
