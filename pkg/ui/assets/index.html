@@ -178,13 +178,13 @@
           ></h1>
           <span
             class="px-2 py-0.5 rounded-full text-xs font-semibold shrink-0"
-            :class="phaseBadgeClass(selectedWorkspace && selectedWorkspace.terraformPhase)"
-            x-text="selectedWorkspace && selectedWorkspace.terraformPhase || '-'"
+            :class="phaseBadgeClass(detail ? detail.terraformPhase : (selectedWorkspace && selectedWorkspace.terraformPhase))"
+            x-text="(detail ? detail.terraformPhase : (selectedWorkspace && selectedWorkspace.terraformPhase)) || '-'"
           ></span>
         </div>
         <p
           class="text-gray-400 text-sm mt-1"
-          x-text="selectedWorkspace && selectedWorkspace.terraformMessage || ''"
+          x-text="(detail ? detail.terraformMessage : (selectedWorkspace && selectedWorkspace.terraformMessage)) || ''"
         ></p>
       </div>
     </div>
@@ -203,19 +203,9 @@
       >Plans</button>
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
-        :class="activeTab === 'planOutput' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
-        @click="activeTab = 'planOutput'; selectedPlan = null"
-      >Plan Output</button>
-      <button
-        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
-        :class="activeTab === 'applyOutput' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
-        @click="activeTab = 'applyOutput'; selectedPlan = null"
-      >Apply Output</button>
-      <button
-        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
-        :class="activeTab === 'initOutput' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
-        @click="activeTab = 'initOutput'; selectedPlan = null"
-      >Init Output</button>
+        :class="activeTab === 'output' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        @click="activeTab = 'output'; selectedPlan = null; outputView = null"
+      >Output</button>
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
         :class="activeTab === 'currentRender' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
@@ -461,29 +451,46 @@
 
       </div>
 
-      <!-- Plan Output Tab -->
-      <div x-show="activeTab === 'planOutput'">
-        <template x-if="detail && !['Planning', 'Applying'].includes(detail.terraformPhase)">
-          <p class="text-xs text-gray-500 mb-3">Last captured output — live during Planning or Applying phase.</p>
-        </template>
-        <div class="h-[calc(100vh-320px)] overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="detail && (detail.lastPlanOutput || (detail.plan && detail.plan.planOutput)) || '(no output)'"></pre>
-        </div>
-      </div>
+      <!-- Output Tab -->
+      <div x-show="activeTab === 'output'" class="flex flex-col" style="height: calc(100vh - 320px)">
 
-      <!-- Apply Output Tab -->
-      <div x-show="activeTab === 'applyOutput'">
-        <template x-if="detail && !['Planning', 'Applying'].includes(detail.terraformPhase)">
-          <p class="text-xs text-gray-500 mb-3">Last captured output — live during Planning or Applying phase.</p>
-        </template>
-        <div class="h-[calc(100vh-320px)] overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="detail && (detail.lastApplyOutput || (detail.plan && detail.plan.applyOutput)) || '(no output)'"></pre>
+        <!-- Sub-navigation -->
+        <div class="flex items-center gap-2 mb-3 flex-wrap">
+          <span class="text-xs text-gray-500" x-text="activeOutputLabel(detail)"></span>
+          <template x-if="detail && (detail.lastPlanOutput || (detail.plan && detail.plan.planOutput))">
+            <button
+              @click="outputView = (outputView === 'plan' ? null : 'plan')"
+              class="px-3 py-1.5 text-xs font-medium rounded border transition-colors"
+              :class="resolvedOutputView(detail) === 'plan'
+                ? (outputView === 'plan' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-gray-800 border-indigo-500 text-indigo-300 hover:bg-gray-700')
+                : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white'"
+            >Plan</button>
+          </template>
+          <template x-if="detail && (detail.lastApplyOutput || (detail.plan && detail.plan.applyOutput))">
+            <button
+              @click="outputView = (outputView === 'apply' ? null : 'apply')"
+              class="px-3 py-1.5 text-xs font-medium rounded border transition-colors"
+              :class="resolvedOutputView(detail) === 'apply'
+                ? (outputView === 'apply' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-gray-800 border-indigo-500 text-indigo-300 hover:bg-gray-700')
+                : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white'"
+            >Apply</button>
+          </template>
+          <template x-if="detail && detail.initOutput">
+            <button
+              @click="outputView = (outputView === 'init' ? null : 'init')"
+              class="px-3 py-1.5 text-xs font-medium rounded border transition-colors"
+              :class="resolvedOutputView(detail) === 'init'
+                ? (outputView === 'init' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-gray-800 border-indigo-500 text-indigo-300 hover:bg-gray-700')
+                : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white'"
+            >Init</button>
+          </template>
         </div>
-      </div>
 
-      <!-- Init Output Tab -->
-      <div x-show="activeTab === 'initOutput'" class="h-[calc(100vh-320px)] overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
-        <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="detail && detail.initOutput || '(no output)'"></pre>
+        <!-- Output area -->
+        <div class="flex-1 overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="currentOutputContent(detail)"></pre>
+        </div>
+
       </div>
 
       <!-- Current Render Tab -->
@@ -509,6 +516,7 @@
         plansLoading: false,
         selectedPlan: null,
         planOutputTab: 'plan',
+        outputView: null,
 
         contexts: [],
         namespaces: [],
@@ -618,6 +626,7 @@
           this.detail = null;
           this.plans = [];
           this.selectedPlan = null;
+          this.outputView = null;
           this.fetchDetail(ws.namespace, ws.name);
         },
 
@@ -648,6 +657,35 @@
             .then(r => r.json())
             .then(data => { this.plans = data; this.plansLoading = false; })
             .catch(() => { this.plansLoading = false; });
+        },
+
+        resolvedOutputView(detail) {
+          if (this.outputView) return this.outputView;
+          if (!detail) return 'plan';
+          const phase = detail.terraformPhase;
+          if (phase === 'Planning') return 'plan';
+          if (phase === 'Applying') return 'apply';
+          if (phase === 'Initializing') return 'init';
+          if (detail.lastApplyOutput || (detail.plan && detail.plan.applyOutput)) return 'apply';
+          return 'plan';
+        },
+
+        activeOutputLabel(detail) {
+          if (this.outputView) return '';
+          if (!detail) return '';
+          const phase = detail.terraformPhase;
+          if (phase === 'Planning') return 'live —';
+          if (phase === 'Applying') return 'live —';
+          if (phase === 'Initializing') return 'live —';
+          return 'latest —';
+        },
+
+        currentOutputContent(detail) {
+          if (!detail) return '(no output)';
+          const view = this.resolvedOutputView(detail);
+          if (view === 'apply') return detail.lastApplyOutput || (detail.plan && detail.plan.applyOutput) || '(no output)';
+          if (view === 'init') return detail.initOutput || '(no output)';
+          return detail.lastPlanOutput || (detail.plan && detail.plan.planOutput) || '(no output)';
         },
 
         availablePhases() {
