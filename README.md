@@ -202,9 +202,7 @@ kubectl port-forward -n krec-debug svc/krec-debug 2345:2345
 
 ## Nix
 
-A Nix flake is provided for reproducible builds and a dev shell.
-
-Run it directly without installing:
+You can run kube-tf-reconciler in nix directly without installing:
 
 ```sh
 nix run github:LEGO/kube-tf-reconciler -- help
@@ -213,6 +211,35 @@ nix run github:LEGO/kube-tf-reconciler -- help
 
 nix run .#krec -- help
 ```
+
+To install it in your nix profile, you can run:
+
+```sh
+nix profile install github:LEGO/kube-tf-reconciler
+```
+
+Or if you use home-manager or nixos flake adds:
+
+```nix
+# In the inputs:
+
+  inputs.krec.url = "github:LEGO/kube-tf-reconciler";
+  inputs.krec.nixpkgs.follows = "nixpkgs"; # Optional
+
+# In the outputs for NixOS:
+
+  environment.systemPackages = [
+    inputs.krec.packages.${pkgs.system}.default
+  ]
+
+# In the outputs for home-manager:
+
+  home.packages = [
+    inputs.krec.packages.${pkgs.system}.default
+  ];
+```
+
+### Development
 
 Build the `krec` binary (output at `./result/bin/krec`):
 
