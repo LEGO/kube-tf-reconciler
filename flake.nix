@@ -24,13 +24,9 @@
         src = ./.;
         subPackages = ["."];
 
-        # This hash must be refreshed whenever go.mod or go.sum change.
-        # Refresh workflow:
-        # 1. Run `nix build .#krec`. The build fails with a hash
-        #    mismatch listing a `got: sha256-...` line.
-        # 2. Replace `pkgs.lib.fakeHash` below with that value as a
-        #    quoted SRI string (e.g. "sha256-abc...=").
-        # `nix-prefetch` and `nix-update` can automate the refresh.
+        # How to get the vendorHash:
+        # Option 1: set to lib.fakeHash and paste the value at build time
+        # Option 2: go mod vendor && nix hash path --sri ./vendor
         vendorHash = "sha256-7oXuw88kHgTvs2MEu5tmNMUK1DbbK0YyYK62EBjAaIw=";
 
         env.CGO_ENABLED = "0";
