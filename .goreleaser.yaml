@@ -71,6 +71,6 @@ brews:
       name: homebrew-tap
       git:
         url: git@github.com:LEGO/homebrew-tap.git
-        private_key: '{{ .Env.GITHUB_BREW_PRIVATE_KEY_LEGO }}'
+        private_key: '{{ .Env.GITHUB_BREW_PRIVATE_KEY }}'
     directory: Formula
     skip_upload: auto
