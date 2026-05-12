@@ -747,6 +747,7 @@ resource "random_pet" "name" {
 			ws.Generation = 1
 			ws.Status.ObservedGeneration = 1
 			ws.Status.Backoff.RetryCount = 3
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
 			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
 			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
 
@@ -779,10 +780,83 @@ resource "random_pet" "name" {
 			ws.Generation = 2 // changed
 			ws.Status.ObservedGeneration = 1
 			ws.Status.Backoff.RetryCount = 3
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
 			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
 			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
 
 			// Force reconcile to exit at lease acquisition (no terraform)
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			_, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			// Backoff must be cleared in stored object
+			var wsAfter tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfter))
+
+			require.Equal(t, int32(0), wsAfter.Status.Backoff.RetryCount)
+			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
+		})
+
+		t.Run("does not apply backoff when only metadata changed; clears backoff", func(t *testing.T) {
+			ws := newWs("test-backoff-metadata-changed", modHost.ModuleSource("my-module"))
+
+			// Spec unchanged => generation unchanged
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 1
+
+			if ws.Labels == nil {
+				ws.Labels = map[string]string{}
+			}
+
+			if ws.Annotations == nil {
+				ws.Annotations = map[string]string{}
+			}
+			// Simulate previously observed metadata
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+
+			// Now simulate a user metadata-only update (labels/annotations)
+			ws.Annotations["example.com/trigger-reconcile"] = "new-value"
+
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			require.NotEqual(t, ws.Status.ObservedMetadataHash, workspaceMetadataHash(ws))
+
+			// Force reconcile to exit at lease acquisition (no terraform), same trick as your other test
 			now := metav1.NewMicroTime(time.Now())
 			otherLease := &coordinationv1.Lease{
 				ObjectMeta: metav1.ObjectMeta{

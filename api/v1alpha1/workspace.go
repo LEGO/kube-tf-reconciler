@@ -245,6 +245,9 @@ type WorkspaceStatus struct {
 	// ObservedGeneration is the observed generation of the workspace
 	// +kubebuilder:validation:Optional
 	ObservedGeneration int64 `json:"observedGeneration"`
+	// ObservedMetadataHash is a fingerprint of labels+annotations (excluding ignored annotations)
+	// +kubebuilder:validation:Optional
+	ObservedMetadataHash string `json:"observedMetadataHash"`
 
 	// NewPlanNeeded indicates whether a new plan is needed
 	// +kubebuilder:validation:Optional

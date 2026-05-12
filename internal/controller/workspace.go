@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -150,8 +152,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
-		if ws.Generation != ws.Status.ObservedGeneration {
-			// Resource was changed by the user — clear backoff and proceed immediately
+		metadataHash := workspaceMetadataHash(ws)
+
+		resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
+			ws.Status.ObservedMetadataHash != metadataHash
+
+		if resourceChanged {
+			// Resource was changed by the user (spec or metadata) — clear backoff and proceed immediately
 			r.clearBackoff(ctx, ws)
 		} else {
 			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
@@ -722,6 +729,7 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 
 		old = ws.DeepCopy()
 		ws.Status.ObservedGeneration = ws.Generation
+		ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
 		ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(nextRefreshInterval))
 
 		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
@@ -1344,4 +1352,42 @@ func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Works
 	if backoffErr != nil {
 		slog.ErrorContext(ctx, "failed to update backoff status", "error", backoffErr.Error())
 	}
+}
+
+func workspaceMetadataHash(ws *tfv1alphav1.Workspace) string {
+	// Keep this in sync with TypedAnnotationChangedPredicate ignore list
+	ignoreAnnotations := map[string]struct{}{
+		"kubectl.kubernetes.io/last-applied-configuration": {},
+	}
+
+	ann := maps.Clone(ws.GetAnnotations())
+	for k := range ignoreAnnotations {
+		delete(ann, k)
+	}
+
+	lbl := maps.Clone(ws.GetLabels())
+
+	// Build a stable string: sorted keys + values
+	var parts []string
+
+	aKeys := make([]string, 0, len(ann))
+	for k := range ann {
+		aKeys = append(aKeys, k)
+	}
+	sort.Strings(aKeys)
+	for _, k := range aKeys {
+		parts = append(parts, "a:"+k+"="+ann[k])
+	}
+
+	lKeys := make([]string, 0, len(lbl))
+	for k := range lbl {
+		lKeys = append(lKeys, k)
+	}
+	sort.Strings(lKeys)
+	for _, k := range lKeys {
+		parts = append(parts, "l:"+k+"="+lbl[k])
+	}
+
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:])
 }
