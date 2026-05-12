@@ -67,6 +67,10 @@ const (
 	TFPhaseErrored      = "Errored"
 )
 
+var ignoredWorkspaceAnnotations = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+}
+
 func isNil(arg any) bool {
 	if v := reflect.ValueOf(arg); !v.IsValid() || ((v.Kind() == reflect.Ptr ||
 		v.Kind() == reflect.Interface ||
@@ -102,11 +106,7 @@ func (TypedAnnotationChangedPredicate[object]) Update(e event.TypedUpdateEvent[o
 	newAnnotations := maps.Clone(e.ObjectNew.GetAnnotations())
 	oldAnnotations := maps.Clone(e.ObjectOld.GetAnnotations())
 
-	ignoreAnnotations := []string{
-		"kubectl.kubernetes.io/last-applied-configuration",
-	}
-
-	for _, annotation := range ignoreAnnotations {
+	for _, annotation := range ignoredWorkspaceAnnotations {
 		delete(newAnnotations, annotation)
 		delete(oldAnnotations, annotation)
 	}
@@ -154,12 +154,14 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
 		metadataHash := workspaceMetadataHash(ws)
 
-		resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
-			ws.Status.ObservedMetadataHash != metadataHash
+		metadataChanged := ws.Status.ObservedMetadataHash != "" && ws.Status.ObservedMetadataHash != metadataHash
+		resourceChanged := ws.Generation != ws.Status.ObservedGeneration || metadataChanged
 
 		if resourceChanged {
 			// Resource was changed by the user (spec or metadata) — clear backoff and proceed immediately
-			r.clearBackoff(ctx, ws)
+			if err := r.clearBackoff(ctx, ws); err != nil {
+				slog.ErrorContext(ctx, "failed to clear backoff status", "error", err.Error())
+			}
 		} else {
 			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
 			return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
@@ -1320,9 +1322,9 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 	return outputCh, wg
 }
 
-func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
+func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.Workspace) error {
 	key := types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name}
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &tfv1alphav1.Workspace{}
 		if err := r.Client.Get(ctx, key, latest); err != nil {
 			return err
@@ -1333,13 +1335,9 @@ func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.
 		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
 			return err
 		}
-		ws.Status.Backoff.NextRetryTime = latest.Status.Backoff.NextRetryTime
-		ws.Status.Backoff.RetryCount = latest.Status.Backoff.RetryCount
+		*ws = *latest.DeepCopy()
 		return nil
 	})
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to clear backoff status", "error", err.Error())
-	}
 }
 
 func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
@@ -1354,15 +1352,23 @@ func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Works
 	}
 }
 
-func workspaceMetadataHash(ws *tfv1alphav1.Workspace) string {
-	// Keep this in sync with TypedAnnotationChangedPredicate ignore list
-	ignoreAnnotations := map[string]struct{}{
-		"kubectl.kubernetes.io/last-applied-configuration": {},
+func isIgnoredWorkspaceAnnotation(key string) bool {
+	for _, ignoredKey := range ignoredWorkspaceAnnotations {
+		if key == ignoredKey {
+			return true
+		}
 	}
 
+	return false
+}
+
+func workspaceMetadataHash(ws *tfv1alphav1.Workspace) string {
+
 	ann := maps.Clone(ws.GetAnnotations())
-	for k := range ignoreAnnotations {
-		delete(ann, k)
+	for k := range ann {
+		if isIgnoredWorkspaceAnnotation(k) {
+			delete(ann, k)
+		}
 	}
 
 	lbl := maps.Clone(ws.GetLabels())
