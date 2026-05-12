@@ -154,13 +154,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
 		metadataHash := workspaceMetadataHash(ws)
 
-		metadataChanged := ws.Status.ObservedMetadataHash != "" && ws.Status.ObservedMetadataHash != metadataHash
-		resourceChanged := ws.Generation != ws.Status.ObservedGeneration || metadataChanged
+		resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
+			ws.Status.ObservedMetadataHash != metadataHash
 
 		if resourceChanged {
 			// Resource was changed by the user (spec or metadata) — clear backoff and proceed immediately
 			if err := r.clearBackoff(ctx, ws); err != nil {
-				slog.ErrorContext(ctx, "failed to clear backoff status", "error", err.Error())
+				return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
 			}
 		} else {
 			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
@@ -1341,12 +1341,30 @@ func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.
 }
 
 func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
-	old := ws.DeepCopy()
-	backoff := math.Pow(2, float64(ws.Status.Backoff.RetryCount)) * 30
-	backoffDuration := time.Duration(math.Min(backoff, 20*60)) * time.Second
-	ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoffDuration)}
-	ws.Status.Backoff.RetryCount++
-	backoffErr := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	key := types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name}
+	backoffErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &tfv1alphav1.Workspace{}
+		if err := r.Client.Get(ctx, key, latest); err != nil {
+			return err
+		}
+
+		old := latest.DeepCopy()
+		backoff := math.Pow(2, float64(latest.Status.Backoff.RetryCount)) * 30
+		backoffDuration := time.Duration(math.Min(backoff, 20*60)) * time.Second
+		latest.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoffDuration)}
+		latest.Status.Backoff.RetryCount++
+
+		if latest.Status.ObservedMetadataHash == "" {
+			latest.Status.ObservedMetadataHash = workspaceMetadataHash(latest)
+		}
+
+		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
+			return err
+		}
+
+		*ws = *latest.DeepCopy()
+		return nil
+	})
 	if backoffErr != nil {
 		slog.ErrorContext(ctx, "failed to update backoff status", "error", backoffErr.Error())
 	}

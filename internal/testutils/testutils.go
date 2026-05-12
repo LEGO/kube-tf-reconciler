@@ -150,8 +150,16 @@ func GetSecret(c klient.Client, name, namespace string) (*corev1.Secret, error) 
 }
 
 func envtestBinaryMissing(dir, name string) bool {
-	_, err := os.Stat(filepath.Join(dir, name))
-	return err != nil
+	path := filepath.Join(dir, name)
+	_, err := os.Stat(path)
+	if err == nil {
+		return false
+	}
+	if os.IsNotExist(err) {
+		return true
+	}
+	logf.Log.Error(err, "Failed to stat envtest binary", "path", path)
+	return false
 }
 
 func isValidEnvtestAssetsDir(dir string) bool {
