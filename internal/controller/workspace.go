@@ -154,8 +154,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
 		metadataHash := workspaceMetadataHash(ws)
 		if ws.Status.ObservedMetadataHash == "" {
-			if err := r.initializeObservedMetadataHash(ctx, ws, metadataHash); err != nil {
-				return ctrl.Result{}, fmt.Errorf("initialize observed metadata hash: %w", err)
+			if err := r.initializeObservedResourceState(ctx, ws, metadataHash); err != nil {
+				return ctrl.Result{}, fmt.Errorf("initialize observed resource state: %w", err)
 			}
 
 			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
@@ -1426,7 +1426,7 @@ func workspaceMetadataHash(ws *tfv1alphav1.Workspace) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (r *WorkspaceReconciler) initializeObservedMetadataHash(ctx context.Context, ws *tfv1alphav1.Workspace, metadataHash string) error {
+func (r *WorkspaceReconciler) initializeObservedResourceState(ctx context.Context, ws *tfv1alphav1.Workspace, metadataHash string) error {
 	key := types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &tfv1alphav1.Workspace{}
@@ -1440,6 +1440,7 @@ func (r *WorkspaceReconciler) initializeObservedMetadataHash(ctx context.Context
 		}
 
 		old := latest.DeepCopy()
+		latest.Status.ObservedGeneration = latest.Generation
 		latest.Status.ObservedMetadataHash = metadataHash
 
 		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {

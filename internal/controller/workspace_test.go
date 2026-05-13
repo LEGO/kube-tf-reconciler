@@ -448,9 +448,12 @@ resource "random_pet" "name" {
 		}), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
-		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
-		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to execute terraform plan")
-		assert.NotNil(t, ws.Status.LastErrorTime)
+		var got tfv1alphav1.Workspace
+		assert.NoError(t, k.Resources().Get(ctx, ws.GetName(), ws.GetNamespace(), &got))
+
+		assert.Equal(t, TFPhaseErrored, got.Status.TerraformPhase)
+		assert.Contains(t, got.Status.LastErrorMessage, "Failed to execute terraform plan")
+		assert.NotNil(t, got.Status.LastErrorTime)
 	})
 
 	t.Run("error message persisted on terraform apply failure", func(t *testing.T) {
@@ -459,7 +462,7 @@ resource "random_pet" "name" {
 		// This uses a null_resource with a local-exec provisioner that will fail
 		applyFailModule := `resource "null_resource" "fail" {
   provisioner "local-exec" {
-    command = "exit 1"
+    command = "sh -c 'exit 1'"
   }
 }`
 		modHost.AddFileToModule("apply-fail-module", "main.tf", applyFailModule)
@@ -475,18 +478,22 @@ resource "random_pet" "name" {
 		})
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		waitErr := wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			w := object.(*tfv1alphav1.Workspace)
 			return w.Status.TerraformPhase == TFPhaseErrored &&
 				w.Status.LastErrorMessage != "" &&
-				w.Status.LastErrorTime != nil
+				w.Status.LastErrorTime != nil &&
+				w.Status.LastApplyOutput != ""
 		}), wait.WithContext(ctx))
-		assert.NoError(t, err)
+		assert.NoError(t, waitErr)
 
-		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
-		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to apply terraform")
-		assert.NotNil(t, ws.Status.LastErrorTime)
-		assert.NotEmpty(t, ws.Status.LastApplyOutput)
+		var got tfv1alphav1.Workspace
+		assert.NoError(t, k.Resources().Get(ctx, ws.GetName(), ws.GetNamespace(), &got))
+
+		assert.Equal(t, TFPhaseErrored, got.Status.TerraformPhase)
+		assert.Contains(t, got.Status.LastErrorMessage, "Failed to apply terraform")
+		assert.NotNil(t, got.Status.LastErrorTime)
+		assert.NotEmpty(t, got.Status.LastApplyOutput)
 	})
 
 	t.Run("error message cleared on successful reconciliation", func(t *testing.T) {
@@ -1046,6 +1053,65 @@ resource "random_pet" "name" {
 			}, &wsAfterSecond))
 
 			require.Equal(t, int32(1), wsAfterSecond.Status.Backoff.RetryCount)
+			require.NotNil(t, wsAfterSecond.Status.Backoff.NextRetryTime)
+		})
+
+		t.Run("legacy object with empty observed state continues honoring backoff on subsequent reconcile", func(t *testing.T) {
+			ws := newWs("test-backoff-empty-observed-state-second-pass", modHost.ModuleSource("my-module"))
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 0
+			ws.Status.ObservedMetadataHash = ""
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			// First reconcile initializes observed state and still honors backoff
+			res1, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+			require.True(t, res1.RequeueAfter > 0)
+
+			var wsAfterFirst tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfterFirst))
+
+			require.Equal(t, wsAfterFirst.Generation, wsAfterFirst.Status.ObservedGeneration)
+			require.Equal(t, workspaceMetadataHash(&wsAfterFirst), wsAfterFirst.Status.ObservedMetadataHash)
+			require.Equal(t, int32(3), wsAfterFirst.Status.Backoff.RetryCount)
+			require.NotNil(t, wsAfterFirst.Status.Backoff.NextRetryTime)
+
+			// Second reconcile during same backoff should still honor backoff
+			res2, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+			require.True(t, res2.RequeueAfter > 0)
+
+			var wsAfterSecond tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfterSecond))
+
+			require.Equal(t, int32(3), wsAfterSecond.Status.Backoff.RetryCount)
 			require.NotNil(t, wsAfterSecond.Status.Backoff.NextRetryTime)
 		})
 	})
