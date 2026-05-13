@@ -153,21 +153,24 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
 		metadataHash := workspaceMetadataHash(ws)
-		resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
-			(ws.Status.ObservedMetadataHash != "" && ws.Status.ObservedMetadataHash != metadataHash)
 
-		if resourceChanged {
-			// Resource was changed by the user (spec or metadata) — clear backoff and proceed immediately
-			if err := r.clearBackoff(ctx, ws); err != nil {
-				return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
-			}
-		} else if ws.Status.ObservedMetadataHash == "" {
+		if ws.Status.ObservedMetadataHash == "" {
 			if err := r.initializeObservedResourceState(ctx, ws, metadataHash); err != nil {
 				return ctrl.Result{}, fmt.Errorf("initialize observed resource state: %w", err)
 			}
 
 			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
 			return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+		}
+
+		resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
+			ws.Status.ObservedMetadataHash != metadataHash
+
+		if resourceChanged {
+			// Resource was changed by the user (spec or metadata) — clear backoff and proceed immediately
+			if err := r.clearBackoff(ctx, ws); err != nil {
+				return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
+			}
 		} else {
 			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
 			return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
