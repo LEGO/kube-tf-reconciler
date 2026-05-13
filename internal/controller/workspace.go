@@ -1449,8 +1449,8 @@ func (r *WorkspaceReconciler) initializeObservedResourceState(ctx context.Contex
 		}
 
 		old := latest.DeepCopy()
-		latest.Status.ObservedGeneration = latest.Generation
-		latest.Status.ObservedMetadataHash = metadataHash
+		// latest.Status.ObservedGeneration = latest.Generation
+		// latest.Status.ObservedMetadataHash = metadataHash
 
 		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
 			return err
