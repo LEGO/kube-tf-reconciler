@@ -1362,9 +1362,9 @@ func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Works
 		latest.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoffDuration)}
 		latest.Status.Backoff.RetryCount++
 
-		if latest.Status.ObservedMetadataHash == "" {
-			latest.Status.ObservedMetadataHash = workspaceMetadataHash(latest)
-		}
+		// Record the metadata that this failed attempt observed so unchanged
+		// label/annotation retries honor the newly established backoff.
+		latest.Status.ObservedMetadataHash = workspaceMetadataHash(latest)
 
 		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
 			return err
