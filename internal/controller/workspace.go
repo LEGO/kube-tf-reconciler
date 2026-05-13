@@ -155,12 +155,20 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		metadataHash := workspaceMetadataHash(ws)
 
 		if ws.Status.ObservedMetadataHash == "" {
-			if err := r.initializeObservedResourceState(ctx, ws, metadataHash); err != nil {
-				return ctrl.Result{}, fmt.Errorf("initialize observed resource state: %w", err)
-			}
+			if ws.Status.ObservedGeneration != 0 && ws.Generation != ws.Status.ObservedGeneration {
+				// A non-zero observed generation mismatch proves the spec changed, so do not
+				// preserve an existing backoff just because the metadata hash was never initialized.
+				if err := r.clearBackoff(ctx, ws); err != nil {
+					return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
+				}
+			} else {
+				if err := r.initializeObservedResourceState(ctx, ws, metadataHash); err != nil {
+					return ctrl.Result{}, fmt.Errorf("initialize observed resource state: %w", err)
+				}
 
-			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
-			return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+				slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
+				return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+			}
 		}
 
 		resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
