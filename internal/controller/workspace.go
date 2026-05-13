@@ -153,6 +153,14 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
 		metadataHash := workspaceMetadataHash(ws)
+		if ws.Status.ObservedMetadataHash == "" {
+			if err := r.initializeObservedMetadataHash(ctx, ws, metadataHash); err != nil {
+				return ctrl.Result{}, fmt.Errorf("initialize observed metadata hash: %w", err)
+			}
+
+			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
+			return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+		}
 
 		resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
 			ws.Status.ObservedMetadataHash != metadataHash
@@ -1332,6 +1340,8 @@ func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.
 		old := latest.DeepCopy()
 		latest.Status.Backoff.NextRetryTime = nil
 		latest.Status.Backoff.RetryCount = 0
+		latest.Status.ObservedGeneration = latest.Generation
+		latest.Status.ObservedMetadataHash = workspaceMetadataHash(latest)
 		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
 			return err
 		}
@@ -1414,4 +1424,29 @@ func workspaceMetadataHash(ws *tfv1alphav1.Workspace) string {
 
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
 	return hex.EncodeToString(sum[:])
+}
+
+func (r *WorkspaceReconciler) initializeObservedMetadataHash(ctx context.Context, ws *tfv1alphav1.Workspace, metadataHash string) error {
+	key := types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &tfv1alphav1.Workspace{}
+		if err := r.Client.Get(ctx, key, latest); err != nil {
+			return err
+		}
+
+		if latest.Status.ObservedMetadataHash != "" {
+			*ws = *latest.DeepCopy()
+			return nil
+		}
+
+		old := latest.DeepCopy()
+		latest.Status.ObservedMetadataHash = metadataHash
+
+		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
+			return err
+		}
+
+		*ws = *latest.DeepCopy()
+		return nil
+	})
 }

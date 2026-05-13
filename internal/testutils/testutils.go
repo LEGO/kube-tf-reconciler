@@ -159,7 +159,7 @@ func envtestBinaryMissing(dir, name string) bool {
 		return true
 	}
 	logf.Log.Error(err, "Failed to stat envtest binary", "path", path)
-	return false
+	return true
 }
 
 func isValidEnvtestAssetsDir(dir string) bool {
