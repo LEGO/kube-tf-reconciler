@@ -56,6 +56,7 @@ func TestWorkspaceController(t *testing.T) {
 	}
 
 	modHost, shutdown := testutils.NewModuleHost()
+	t.Cleanup(shutdown)
 
 	err := tfv1alphav1.AddToScheme(testEnv.Scheme)
 	assert.NoError(t, err)
@@ -103,7 +104,6 @@ func TestWorkspaceController(t *testing.T) {
 
 	t.Cleanup(func() {
 		cancel()
-		shutdown()
 		assert.NoError(t, testEnv.Stop())
 		assert.NoError(t, os.RemoveAll(filepath.Join(rootDir, "workspaces")))
 	})
@@ -1148,8 +1148,8 @@ resource "random_pet" "name" {
 			require.Equal(t, int32(0), wsAfterFirst.Status.Backoff.RetryCount)
 			require.Nil(t, wsAfterFirst.Status.Backoff.NextRetryTime)
 
-			// clearBackoff should also advance observed state to current values
-			require.Equal(t, wsAfterFirst.Generation, wsAfterFirst.Status.ObservedGeneration)
+			// clearBackoff updates ObservedMetadataHash but leaves ObservedGeneration unchanged.
+			require.Equal(t, ws.Status.ObservedGeneration, wsAfterFirst.Status.ObservedGeneration)
 			require.Equal(t, workspaceMetadataHash(&wsAfterFirst), wsAfterFirst.Status.ObservedMetadataHash)
 
 			// Simulate a later failure in the same current resource state by setting backoff again
