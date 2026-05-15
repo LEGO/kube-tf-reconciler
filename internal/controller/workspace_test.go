@@ -573,6 +573,30 @@ func TestWorkspaceMetadataHash(t *testing.T) {
 		ws.Annotations["example.com/foo"] = "changed"
 		require.NotEqual(t, baseHash, workspaceMetadataHash(ws))
 	})
+
+	t.Run("nil and empty metadata maps hash identically", func(t *testing.T) {
+		nilMeta := &tfv1alphav1.Workspace{}
+		emptyMeta := &tfv1alphav1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{},
+				Labels:      map[string]string{},
+			},
+		}
+		require.Equal(t, workspaceMetadataHash(nilMeta), workspaceMetadataHash(emptyMeta))
+	})
+
+	t.Run("workspace with only ignored annotations hashes same as no annotations", func(t *testing.T) {
+		noAnnotations := &tfv1alphav1.Workspace{}
+		onlyIgnored := &tfv1alphav1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					tfv1alphav1.ManualApplyAnnotation:   "true",
+					tfv1alphav1.ManualDestroyAnnotation: "true",
+				},
+			},
+		}
+		require.Equal(t, workspaceMetadataHash(noAnnotations), workspaceMetadataHash(onlyIgnored))
+	})
 }
 
 func TestLeaseReconciliationBehaviour(t *testing.T) {
@@ -937,6 +961,71 @@ resource "random_pet" "name" {
 			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
 		})
 
+		t.Run("clears backoff for manual apply annotation even when hash is unchanged", func(t *testing.T) {
+			ws := newWs("test-backoff-manual-apply-no-hash-change", modHost.ModuleSource("my-module"))
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 1
+
+			if ws.Annotations == nil {
+				ws.Annotations = map[string]string{}
+			}
+			ws.Annotations["example.com/existing"] = "value"
+			// Set hash AFTER existing annotations but BEFORE manual-apply, so the hash
+			// does not change when manual-apply is added (it's excluded from the hash).
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+			ws.Annotations[tfv1alphav1.ManualApplyAnnotation] = "true"
+
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			// Confirm the hash truly did not change
+			require.Equal(t, ws.Status.ObservedMetadataHash, workspaceMetadataHash(ws))
+
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			_, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			var wsAfter tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfter))
+
+			require.Equal(t, int32(0), wsAfter.Status.Backoff.RetryCount)
+			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
+		})
+
 		t.Run("initializes empty observed metadata hash and still applies backoff when resource is otherwise unchanged", func(t *testing.T) {
 			ws := newWs("test-backoff-empty-observed-hash", modHost.ModuleSource("my-module"))
 			ws.Generation = 1
@@ -1092,7 +1181,7 @@ resource "random_pet" "name" {
 			// user then edited spec to generation 2 — backoff must be cleared even though
 			// ObservedGeneration is 0, not a prior non-zero value.
 			ws := newWs("test-backoff-empty-observed-state-second-pass", modHost.ModuleSource("my-module"))
-			ws.Generation = 1
+			ws.Generation = 2
 			ws.Status.ObservedGeneration = 0
 			ws.Status.ObservedMetadataHash = ""
 			ws.Status.Backoff.RetryCount = 3

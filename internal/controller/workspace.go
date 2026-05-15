@@ -200,7 +200,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 					return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
 				}
 			} else {
-				if err := r.initializeObservedResourceState(ctx, ws, metadataHash); err != nil {
+				if err := r.initializeObservedResourceState(ctx, ws, ws.Generation, metadataHash); err != nil {
 					return ctrl.Result{}, fmt.Errorf("initialize observed resource state: %w", err)
 				}
 
@@ -209,10 +209,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 		} else {
 			resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
-				ws.Status.ObservedMetadataHash != metadataHash
+				ws.Status.ObservedMetadataHash != metadataHash ||
+				ws.ManualApplyRequested() || ws.ManualDestroyRequested()
 
 			if resourceChanged {
-				// Resource was changed by the user (spec or metadata) — clear backoff and proceed immediately
+				// Resource was changed by the user (spec, metadata, or explicit action annotation) — clear backoff and proceed immediately
 				if err := r.clearBackoff(ctx, ws); err != nil {
 					return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
 				}
@@ -1451,8 +1452,14 @@ func workspaceMetadataHash(ws *tfv1alphav1.Workspace) string {
 			delete(ann, k)
 		}
 	}
+	if ann == nil {
+		ann = map[string]string{}
+	}
 
 	lbl := maps.Clone(ws.GetLabels())
+	if lbl == nil {
+		lbl = map[string]string{}
+	}
 
 	data, _ := json.Marshal(struct {
 		Annotations map[string]string `json:"a"`
@@ -1466,7 +1473,7 @@ func workspaceMetadataHash(ws *tfv1alphav1.Workspace) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (r *WorkspaceReconciler) initializeObservedResourceState(ctx context.Context, ws *tfv1alphav1.Workspace, metadataHash string) error {
+func (r *WorkspaceReconciler) initializeObservedResourceState(ctx context.Context, ws *tfv1alphav1.Workspace, observedGeneration int64, metadataHash string) error {
 	key := types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &tfv1alphav1.Workspace{}
@@ -1480,7 +1487,10 @@ func (r *WorkspaceReconciler) initializeObservedResourceState(ctx context.Contex
 		}
 
 		old := latest.DeepCopy()
-		latest.Status.ObservedGeneration = latest.Generation
+		// Use the generation seen at the start of the backoff block, not latest.Generation,
+		// so a spec update that arrived during this retry does not get silently marked as
+		// observed without having been reconciled.
+		latest.Status.ObservedGeneration = observedGeneration
 		latest.Status.ObservedMetadataHash = metadataHash
 		// Match the backoff() invariant: clear the freshness timestamp so the
 		// retry is not skipped by the freshness guard once NextRetryTime expires.
