@@ -1121,4 +1121,91 @@ resource "random_pet" "name" {
 			require.NotNil(t, wsAfterSecond.Status.Backoff.NextRetryTime)
 		})
 	})
+
+	t.Run("freshness guard", func(t *testing.T) {
+		makeFreshWs := func(name string) (*tfv1alphav1.Workspace, *coordinationv1.Lease) {
+			ws := newWs(name, modHost.ModuleSource("my-module"))
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 1
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+			return ws, otherLease
+		}
+
+		t.Run("deletion bypasses freshness guard", func(t *testing.T) {
+			ws, otherLease := makeFreshWs("test-freshness-deletion")
+			deletionTime := metav1.Now()
+			ws.DeletionTimestamp = &deletionTime
+			ws.Finalizers = []string{"test-finalizer"} // required for DeletionTimestamp to persist
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			res, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+			// Freshness guard bypassed: requeue is from lease contention, not the 30-min refresh.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, nextRefreshInterval)
+		})
+
+		t.Run("manual destroy annotation bypasses freshness guard", func(t *testing.T) {
+			ws, otherLease := makeFreshWs("test-freshness-manual-destroy")
+			if ws.Annotations == nil {
+				ws.Annotations = map[string]string{}
+			}
+			ws.Annotations[tfv1alphav1.ManualDestroyAnnotation] = "true"
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			res, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+			// Freshness guard bypassed: requeue is from lease contention, not the 30-min refresh.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, nextRefreshInterval)
+		})
+	})
 }
