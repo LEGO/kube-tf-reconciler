@@ -1026,19 +1026,36 @@ resource "random_pet" "name" {
 			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
 		})
 
-		t.Run("initializes empty observed metadata hash and still applies backoff when resource is otherwise unchanged", func(t *testing.T) {
+		t.Run("clears backoff for legacy object with empty observed metadata hash", func(t *testing.T) {
+			// A reconcile on a legacy object (ObservedMetadataHash=="") could be triggered by a
+			// metadata-only user change. Without a baseline we cannot distinguish that from a
+			// scheduled retry, so backoff must always be cleared to avoid silently blocking the change.
 			ws := newWs("test-backoff-empty-observed-hash", modHost.ModuleSource("my-module"))
 			ws.Generation = 1
 			ws.Status.ObservedGeneration = 1
-			ws.Status.ObservedMetadataHash = "" // legacy object / field not initialized yet
+			ws.Status.ObservedMetadataHash = "" // legacy object — hash field not yet initialized
 			ws.Status.Backoff.RetryCount = 3
 			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
 			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
 
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+
 			c := clientfake.NewClientBuilder().
 				WithScheme(scheme).
 				WithStatusSubresource(ws).
-				WithObjects(ws).
+				WithObjects(ws, otherLease).
 				Build()
 
 			r := &WorkspaceReconciler{
@@ -1050,29 +1067,21 @@ resource "random_pet" "name" {
 				Renderer: render.NewFileRender(t.TempDir()),
 			}
 
-			res, err := r.Reconcile(t.Context(), reconcile.Request{
+			_, err := r.Reconcile(t.Context(), reconcile.Request{
 				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
 			})
 			require.NoError(t, err)
 
-			// Should still honor backoff: positive and well below the 30-min refresh interval.
-			require.Greater(t, res.RequeueAfter, time.Duration(0))
-			require.Less(t, res.RequeueAfter, nextRefreshInterval)
-
-			// But should initialize the observed metadata hash for future comparisons
 			var wsAfter tfv1alphav1.Workspace
 			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
 				Namespace: ws.Namespace,
 				Name:      ws.Name,
 			}, &wsAfter))
 
+			require.Equal(t, int32(0), wsAfter.Status.Backoff.RetryCount)
+			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
 			require.NotEmpty(t, wsAfter.Status.ObservedMetadataHash)
 			require.Equal(t, workspaceMetadataHash(&wsAfter), wsAfter.Status.ObservedMetadataHash)
-			require.True(t, wsAfter.Status.NextRefreshTimestamp.IsZero())
-
-			// Backoff should remain intact
-			require.Equal(t, int32(3), wsAfter.Status.Backoff.RetryCount)
-			require.NotNil(t, wsAfter.Status.Backoff.NextRetryTime)
 		})
 
 		t.Run("after clearing backoff for a resource change, a later failure can set backoff again and it remains applied", func(t *testing.T) {

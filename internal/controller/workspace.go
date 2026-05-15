@@ -190,22 +190,18 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
 			}
 		} else if ws.Status.ObservedMetadataHash == "" {
-			if ws.Generation != ws.Status.ObservedGeneration ||
-				ws.ManualApplyRequested() || ws.ManualDestroyRequested() {
-				// A generation mismatch (including from ObservedGeneration==0) proves the spec
-				// changed; a user-action annotation signals explicit intent — both bypass backoff
-				// rather than recording the current state as the baseline (which would swallow
-				// the user's request).
-				if err := r.clearBackoff(ctx, ws); err != nil {
-					return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
-				}
-			} else {
-				if err := r.initializeObservedResourceState(ctx, ws, ws.Generation, metadataHash); err != nil {
-					return ctrl.Result{}, fmt.Errorf("initialize observed resource state: %w", err)
-				}
-
-				slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
-				return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+			// No hash baseline: cannot determine whether this reconcile was triggered by a
+			// metadata-only user change or by a scheduled retry, so we cannot safely preserve
+			// backoff — the user change would be absorbed as the new baseline and remain blocked.
+			//
+			// Tradeoff: a controller restart will also hit this branch for any object whose
+			// ObservedMetadataHash was never set (i.e. objects that entered backoff before this
+			// field was introduced), causing their backoff to be cleared immediately rather than
+			// preserved across the restart. This is accepted as a one-time migration cost: once
+			// any object passes through backoff() or clearBackoff() the hash is written and this
+			// branch is never reached again for that object.
+			if err := r.clearBackoff(ctx, ws); err != nil {
+				return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
 			}
 		} else {
 			resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
