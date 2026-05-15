@@ -175,7 +175,18 @@ func isValidEnvtestAssetsDir(dir string) bool {
 
 func GetFirstFoundEnvTestBinaryDir() string {
 
-	// 1) Standard envtest convention (user/CI exports this)
+	// 1) setup-envtest standard variable (set by `setup-envtest use -p env` or `eval $(setup-envtest use -p env)`)
+	if dir := os.Getenv("KUBEBUILDER_ASSETS"); dir != "" {
+		if isValidEnvtestAssetsDir(dir) {
+			return dir
+		}
+		logf.Log.Info(
+			"KUBEBUILDER_ASSETS is set but required envtest binaries were not found there",
+			"KUBEBUILDER_ASSETS", dir,
+		)
+	}
+
+	// 2) Legacy envtest variable
 	if dir := os.Getenv("ENVTEST_ASSETS_DIR"); dir != "" {
 		if isValidEnvtestAssetsDir(dir) {
 			return dir
@@ -186,7 +197,7 @@ func GetFirstFoundEnvTestBinaryDir() string {
 		)
 	}
 
-	// 2) Repo-local convention: ../../bin/k8s/<version>/
+	// 3) Repo-local convention: ../../bin/k8s/<version>/
 	basePath := filepath.Join("..", "..", "bin", "k8s")
 	entries, err := os.ReadDir(basePath)
 	if err == nil {
@@ -204,8 +215,8 @@ func GetFirstFoundEnvTestBinaryDir() string {
 		logf.Log.Error(err, "Failed to read directory", "path", basePath)
 	}
 
-	// 3) Fall back: let envtest decide (will try default kubebuilder paths)
-	logf.Log.Info("envtest assets not found; set ENVTEST_ASSETS_DIR using setup-envtest", "basePath", basePath)
+	// 4) Fall back: let envtest decide (will try default kubebuilder paths)
+	logf.Log.Info("envtest assets not found; set KUBEBUILDER_ASSETS using setup-envtest", "basePath", basePath)
 	return ""
 }
 

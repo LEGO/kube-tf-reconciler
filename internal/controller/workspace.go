@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -137,6 +138,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
+	// Snapshot the resource state observed at the start of this reconcile attempt.
+	// Passed to backoff() so it records what this attempt actually ran on, not a
+	// later version that may have arrived while terraform was executing.
+	attemptGeneration := ws.Generation
+	attemptMetadataHash := workspaceMetadataHash(ws)
+
 	// Record the last result phase in metrics
 	switch ws.Status.TerraformPhase {
 	case TFPhaseErrored:
@@ -154,10 +161,17 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
 		metadataHash := workspaceMetadataHash(ws)
 
-		if ws.Status.ObservedMetadataHash == "" {
-			if ws.Status.ObservedGeneration != 0 && ws.Generation != ws.Status.ObservedGeneration {
-				// A non-zero observed generation mismatch proves the spec changed, so do not
-				// preserve an existing backoff just because the metadata hash was never initialized.
+		if !ws.DeletionTimestamp.IsZero() {
+			// Deletion takes priority over backoff — clear it so handleDeletionAndFinalizers runs immediately.
+			if err := r.clearBackoff(ctx, ws); err != nil {
+				return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
+			}
+		} else if ws.Status.ObservedMetadataHash == "" {
+			if (ws.Status.ObservedGeneration != 0 && ws.Generation != ws.Status.ObservedGeneration) ||
+				ws.ManualApplyRequested() || ws.ManualDestroyRequested() {
+				// A generation mismatch proves the spec changed; a user-action annotation
+				// signals explicit intent — both bypass backoff rather than recording the
+				// current state as the baseline (which would swallow the user's request).
 				if err := r.clearBackoff(ctx, ws); err != nil {
 					return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
 				}
@@ -169,19 +183,19 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
 				return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
 			}
-		}
-
-		resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
-			ws.Status.ObservedMetadataHash != metadataHash
-
-		if resourceChanged {
-			// Resource was changed by the user (spec or metadata) — clear backoff and proceed immediately
-			if err := r.clearBackoff(ctx, ws); err != nil {
-				return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
-			}
 		} else {
-			slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
-			return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+			resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
+				ws.Status.ObservedMetadataHash != metadataHash
+
+			if resourceChanged {
+				// Resource was changed by the user (spec or metadata) — clear backoff and proceed immediately
+				if err := r.clearBackoff(ctx, ws); err != nil {
+					return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
+				}
+			} else {
+				slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
+				return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+			}
 		}
 	}
 
@@ -212,7 +226,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if ret {
 		if err != nil {
 			err = fmt.Errorf("setupTerraformForWorkspace: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -221,7 +235,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handleRendering(ctx, ws); ret {
 		if err != nil {
 			err = fmt.Errorf("handleRendering: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -230,7 +244,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handleRefreshDependencies(ctx, ws, tf); ret {
 		if err != nil {
 			err = fmt.Errorf("handleRefreshDependencies: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -239,7 +253,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handleDeletionAndFinalizers(ctx, ws, tf); ret {
 		if err != nil {
 			err = fmt.Errorf("handleDeletionAndFinalizers: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -248,7 +262,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handlePlan(ctx, ws, tf); ret {
 		if err != nil {
 			err = fmt.Errorf("handlePlan: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -257,7 +271,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handleApply(ctx, ws, tf); ret {
 		if err != nil {
 			err = fmt.Errorf("handleApply: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -266,7 +280,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handleReschedule(ctx, ws); ret {
 		if err != nil {
 			err = fmt.Errorf("handleReschedule: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -1349,8 +1363,8 @@ func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.
 		old := latest.DeepCopy()
 		latest.Status.Backoff.NextRetryTime = nil
 		latest.Status.Backoff.RetryCount = 0
-		latest.Status.ObservedGeneration = latest.Generation
 		latest.Status.ObservedMetadataHash = workspaceMetadataHash(latest)
+		latest.Status.NextRefreshTimestamp = metav1.Time{}
 		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
 			return err
 		}
@@ -1359,7 +1373,7 @@ func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.
 	})
 }
 
-func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
+func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace, observedGeneration int64, observedMetadataHash string) {
 	key := types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name}
 	backoffErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &tfv1alphav1.Workspace{}
@@ -1373,11 +1387,15 @@ func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Works
 		latest.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoffDuration)}
 		latest.Status.Backoff.RetryCount++
 
-		// Record the resource state that this failed attempt observed so
-		// unchanged spec or label/annotation retries honor the newly
-		// established backoff.
-		latest.Status.ObservedGeneration = latest.Generation
-		latest.Status.ObservedMetadataHash = workspaceMetadataHash(latest)
+		// Record the resource state this attempt actually observed (snapshotted at
+		// reconcile start, not from the fresh Get above) so a user change that
+		// arrived while terraform was running is not silently absorbed as the
+		// backoff baseline and wrongly treated as unchanged by the backoff gate.
+		latest.Status.ObservedGeneration = observedGeneration
+		latest.Status.ObservedMetadataHash = observedMetadataHash
+		// Clear the freshness timestamp so the retry is not skipped by the
+		// freshness guard once NextRetryTime expires.
+		latest.Status.NextRefreshTimestamp = metav1.Time{}
 
 		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
 			return err
@@ -1402,7 +1420,6 @@ func isIgnoredWorkspaceAnnotation(key string) bool {
 }
 
 func workspaceMetadataHash(ws *tfv1alphav1.Workspace) string {
-
 	ann := maps.Clone(ws.GetAnnotations())
 	for k := range ann {
 		if isIgnoredWorkspaceAnnotation(k) {
@@ -1412,28 +1429,15 @@ func workspaceMetadataHash(ws *tfv1alphav1.Workspace) string {
 
 	lbl := maps.Clone(ws.GetLabels())
 
-	// Build a stable string: sorted keys + values
-	var parts []string
+	data, _ := json.Marshal(struct {
+		Annotations map[string]string `json:"a"`
+		Labels      map[string]string `json:"l"`
+	}{
+		Annotations: ann,
+		Labels:      lbl,
+	})
 
-	aKeys := make([]string, 0, len(ann))
-	for k := range ann {
-		aKeys = append(aKeys, k)
-	}
-	sort.Strings(aKeys)
-	for _, k := range aKeys {
-		parts = append(parts, "a:"+k+"="+ann[k])
-	}
-
-	lKeys := make([]string, 0, len(lbl))
-	for k := range lbl {
-		lKeys = append(lKeys, k)
-	}
-	sort.Strings(lKeys)
-	for _, k := range lKeys {
-		parts = append(parts, "l:"+k+"="+lbl[k])
-	}
-
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
 

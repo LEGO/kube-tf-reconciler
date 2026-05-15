@@ -778,9 +778,9 @@ resource "random_pet" "name" {
 			})
 			require.NoError(t, err)
 
-			// Should return due to backoff (rough bound to avoid flakes)
-			//require.True(t, res.RequeueAfter > time.Minute)
-			require.True(t, res.RequeueAfter > 0)
+			// Should return due to backoff: positive and well below the 30-min refresh interval.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, nextRefreshInterval)
 		})
 
 		t.Run("does not apply backoff when resource changed; clears backoff", func(t *testing.T) {
@@ -939,9 +939,9 @@ resource "random_pet" "name" {
 			})
 			require.NoError(t, err)
 
-			// Should still honor backoff
-			//require.True(t, res.RequeueAfter > time.Minute)
-			require.True(t, res.RequeueAfter > 0)
+			// Should still honor backoff: positive and well below the 30-min refresh interval.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, nextRefreshInterval)
 
 			// But should initialize the observed metadata hash for future comparisons
 			var wsAfter tfv1alphav1.Workspace
@@ -1027,7 +1027,7 @@ resource "random_pet" "name" {
 			require.Equal(t, workspaceMetadataHash(&wsAfterFirst), wsAfterFirst.Status.ObservedMetadataHash)
 
 			// Simulate a later failure in the same current resource state by setting backoff again
-			r.backoff(t.Context(), &wsAfterFirst)
+			r.backoff(t.Context(), &wsAfterFirst, wsAfterFirst.Generation, workspaceMetadataHash(&wsAfterFirst))
 
 			var wsAfterBackoff tfv1alphav1.Workspace
 			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
@@ -1044,7 +1044,10 @@ resource "random_pet" "name" {
 				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
 			})
 			require.NoError(t, err)
-			require.True(t, res.RequeueAfter > 0)
+			// backoff() with RetryCount=0 produces a 30s window — assert it's the backoff
+			// path and not the 30-min freshness path.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, time.Minute)
 
 			var wsAfterSecond tfv1alphav1.Workspace
 			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
@@ -1085,7 +1088,8 @@ resource "random_pet" "name" {
 				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
 			})
 			require.NoError(t, err)
-			require.True(t, res1.RequeueAfter > 0)
+			require.Greater(t, res1.RequeueAfter, time.Duration(0))
+			require.Less(t, res1.RequeueAfter, nextRefreshInterval)
 
 			var wsAfterFirst tfv1alphav1.Workspace
 			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
@@ -1103,7 +1107,8 @@ resource "random_pet" "name" {
 				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
 			})
 			require.NoError(t, err)
-			require.True(t, res2.RequeueAfter > 0)
+			require.Greater(t, res2.RequeueAfter, time.Duration(0))
+			require.Less(t, res2.RequeueAfter, nextRefreshInterval)
 
 			var wsAfterSecond tfv1alphav1.Workspace
 			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
