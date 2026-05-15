@@ -1060,7 +1060,10 @@ resource "random_pet" "name" {
 			require.NotNil(t, wsAfterSecond.Status.Backoff.NextRetryTime)
 		})
 
-		t.Run("legacy object with empty observed state continues honoring backoff on subsequent reconcile", func(t *testing.T) {
+		t.Run("legacy object with generation mismatch and empty observed state clears backoff", func(t *testing.T) {
+			// Simulates: generation-1 attempt failed (backoff set, ObservedGeneration=0),
+			// user then edited spec to generation 2 — backoff must be cleared even though
+			// ObservedGeneration is 0, not a prior non-zero value.
 			ws := newWs("test-backoff-empty-observed-state-second-pass", modHost.ModuleSource("my-module"))
 			ws.Generation = 1
 			ws.Status.ObservedGeneration = 0
@@ -1069,10 +1072,24 @@ resource "random_pet" "name" {
 			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
 			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
 
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+
 			c := clientfake.NewClientBuilder().
 				WithScheme(scheme).
 				WithStatusSubresource(ws).
-				WithObjects(ws).
+				WithObjects(ws, otherLease).
 				Build()
 
 			r := &WorkspaceReconciler{
@@ -1084,41 +1101,19 @@ resource "random_pet" "name" {
 				Renderer: render.NewFileRender(t.TempDir()),
 			}
 
-			// First reconcile initializes observed state and still honors backoff
-			res1, err := r.Reconcile(t.Context(), reconcile.Request{
+			_, err := r.Reconcile(t.Context(), reconcile.Request{
 				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
 			})
 			require.NoError(t, err)
-			require.Greater(t, res1.RequeueAfter, time.Duration(0))
-			require.Less(t, res1.RequeueAfter, nextRefreshInterval)
 
-			var wsAfterFirst tfv1alphav1.Workspace
+			var wsAfter tfv1alphav1.Workspace
 			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
 				Namespace: ws.Namespace,
 				Name:      ws.Name,
-			}, &wsAfterFirst))
+			}, &wsAfter))
 
-			require.Equal(t, wsAfterFirst.Generation, wsAfterFirst.Status.ObservedGeneration)
-			require.Equal(t, workspaceMetadataHash(&wsAfterFirst), wsAfterFirst.Status.ObservedMetadataHash)
-			require.Equal(t, int32(3), wsAfterFirst.Status.Backoff.RetryCount)
-			require.NotNil(t, wsAfterFirst.Status.Backoff.NextRetryTime)
-
-			// Second reconcile during same backoff should still honor backoff
-			res2, err := r.Reconcile(t.Context(), reconcile.Request{
-				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
-			})
-			require.NoError(t, err)
-			require.Greater(t, res2.RequeueAfter, time.Duration(0))
-			require.Less(t, res2.RequeueAfter, nextRefreshInterval)
-
-			var wsAfterSecond tfv1alphav1.Workspace
-			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
-				Namespace: ws.Namespace,
-				Name:      ws.Name,
-			}, &wsAfterSecond))
-
-			require.Equal(t, int32(3), wsAfterSecond.Status.Backoff.RetryCount)
-			require.NotNil(t, wsAfterSecond.Status.Backoff.NextRetryTime)
+			require.Equal(t, int32(0), wsAfter.Status.Backoff.RetryCount)
+			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
 		})
 	})
 

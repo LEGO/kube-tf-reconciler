@@ -178,11 +178,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
 			}
 		} else if ws.Status.ObservedMetadataHash == "" {
-			if (ws.Status.ObservedGeneration != 0 && ws.Generation != ws.Status.ObservedGeneration) ||
+			if ws.Generation != ws.Status.ObservedGeneration ||
 				ws.ManualApplyRequested() || ws.ManualDestroyRequested() {
-				// A generation mismatch proves the spec changed; a user-action annotation
-				// signals explicit intent — both bypass backoff rather than recording the
-				// current state as the baseline (which would swallow the user's request).
+				// A generation mismatch (including from ObservedGeneration==0) proves the spec
+				// changed; a user-action annotation signals explicit intent — both bypass backoff
+				// rather than recording the current state as the baseline (which would swallow
+				// the user's request).
 				if err := r.clearBackoff(ctx, ws); err != nil {
 					return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
 				}
