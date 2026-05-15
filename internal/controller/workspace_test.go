@@ -548,6 +548,33 @@ func newWs(name, moduleSource string) *tfv1alphav1.Workspace {
 	}
 }
 
+func TestWorkspaceMetadataHash(t *testing.T) {
+	base := &tfv1alphav1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{"example.com/foo": "bar"},
+		},
+	}
+	baseHash := workspaceMetadataHash(base)
+
+	t.Run("ManualApplyAnnotation does not affect hash", func(t *testing.T) {
+		ws := base.DeepCopy()
+		ws.Annotations[tfv1alphav1.ManualApplyAnnotation] = "true"
+		require.Equal(t, baseHash, workspaceMetadataHash(ws))
+	})
+
+	t.Run("ManualDestroyAnnotation does not affect hash", func(t *testing.T) {
+		ws := base.DeepCopy()
+		ws.Annotations[tfv1alphav1.ManualDestroyAnnotation] = "true"
+		require.Equal(t, baseHash, workspaceMetadataHash(ws))
+	})
+
+	t.Run("other annotation change does affect hash", func(t *testing.T) {
+		ws := base.DeepCopy()
+		ws.Annotations["example.com/foo"] = "changed"
+		require.NotEqual(t, baseHash, workspaceMetadataHash(ws))
+	})
+}
+
 func TestLeaseReconciliationBehaviour(t *testing.T) {
 	modHost, shutdown := testutils.NewModuleHost()
 	defer shutdown()

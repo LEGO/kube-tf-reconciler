@@ -68,8 +68,20 @@ const (
 	TFPhaseErrored      = "Errored"
 )
 
-var ignoredWorkspaceAnnotations = []string{
+// ignoredWatchAnnotations are stripped before the annotation-changed predicate
+// compares old vs new, preventing tooling-managed annotations from triggering spurious reconciles.
+var ignoredWatchAnnotations = []string{
 	"kubectl.kubernetes.io/last-applied-configuration",
+}
+
+// ignoredHashAnnotations are excluded from workspaceMetadataHash. This is a superset of
+// ignoredWatchAnnotations: controller-lifecycle annotations (manual-apply/destroy) are also
+// excluded so the controller's own cleanup of these annotations does not create a spurious
+// hash mismatch that would incorrectly clear backoff on the next reconcile.
+var ignoredHashAnnotations = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+	tfv1alphav1.ManualApplyAnnotation,
+	tfv1alphav1.ManualDestroyAnnotation,
 }
 
 func isNil(arg any) bool {
@@ -118,7 +130,7 @@ func (TypedAnnotationChangedPredicate[object]) Update(e event.TypedUpdateEvent[o
 	newAnnotations := maps.Clone(e.ObjectNew.GetAnnotations())
 	oldAnnotations := maps.Clone(e.ObjectOld.GetAnnotations())
 
-	for _, annotation := range ignoredWorkspaceAnnotations {
+	for _, annotation := range ignoredWatchAnnotations {
 		delete(newAnnotations, annotation)
 		delete(oldAnnotations, annotation)
 	}
@@ -1423,7 +1435,7 @@ func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Works
 }
 
 func isIgnoredWorkspaceAnnotation(key string) bool {
-	for _, ignoredKey := range ignoredWorkspaceAnnotations {
+	for _, ignoredKey := range ignoredHashAnnotations {
 		if key == ignoredKey {
 			return true
 		}

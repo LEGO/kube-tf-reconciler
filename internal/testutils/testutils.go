@@ -215,7 +215,14 @@ func GetFirstFoundEnvTestBinaryDir() string {
 		logf.Log.Error(err, "Failed to read directory", "path", basePath)
 	}
 
-	// 4) Fall back: let envtest decide (will try default kubebuilder paths)
+	// 4) Fall back: let envtest decide (will try default kubebuilder paths).
+	// Unset any env vars that were set-but-invalid so envtest does not re-read
+	// the same bad directory when BinaryAssetsDirectory is empty.
+	for _, v := range []string{"KUBEBUILDER_ASSETS", "ENVTEST_ASSETS_DIR"} {
+		if os.Getenv(v) != "" {
+			os.Unsetenv(v)
+		}
+	}
 	logf.Log.Info("envtest assets not found; set KUBEBUILDER_ASSETS using setup-envtest", "basePath", basePath)
 	return ""
 }
