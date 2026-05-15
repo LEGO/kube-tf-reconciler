@@ -1349,6 +1349,8 @@ func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.
 		old := latest.DeepCopy()
 		latest.Status.Backoff.NextRetryTime = nil
 		latest.Status.Backoff.RetryCount = 0
+		latest.Status.ObservedGeneration = latest.Generation
+		latest.Status.ObservedMetadataHash = workspaceMetadataHash(latest)
 		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
 			return err
 		}
@@ -1449,8 +1451,8 @@ func (r *WorkspaceReconciler) initializeObservedResourceState(ctx context.Contex
 		}
 
 		old := latest.DeepCopy()
-		// latest.Status.ObservedGeneration = latest.Generation
-		// latest.Status.ObservedMetadataHash = metadataHash
+		latest.Status.ObservedGeneration = latest.Generation
+		latest.Status.ObservedMetadataHash = metadataHash
 
 		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
 			return err
