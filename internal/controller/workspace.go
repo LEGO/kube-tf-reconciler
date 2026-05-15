@@ -92,6 +92,17 @@ type TypedAnnotationChangedPredicate[object metav1.Object] struct {
 	predicate.TypedFuncs[object]
 }
 
+// DeletionTimestampChangedPredicate passes update events where DeletionTimestamp
+// transitions from nil to non-nil, ensuring a deleted Workspace is reconciled
+// immediately rather than waiting for the next scheduled retry.
+type DeletionTimestampChangedPredicate struct {
+	predicate.Funcs
+}
+
+func (DeletionTimestampChangedPredicate) Update(e event.UpdateEvent) bool {
+	return e.ObjectOld.GetDeletionTimestamp().IsZero() && !e.ObjectNew.GetDeletionTimestamp().IsZero()
+}
+
 // Update implements default UpdateEvent filter for validating annotation
 // change, allowing to ignore some annotations.
 func (TypedAnnotationChangedPredicate[object]) Update(e event.TypedUpdateEvent[object]) bool {
@@ -790,6 +801,7 @@ func (r *WorkspaceReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Man
 				predicate.GenerationChangedPredicate{},
 				predicate.LabelChangedPredicate{},
 				AnnotationChangedPredicate{},
+				DeletionTimestampChangedPredicate{},
 			),
 		)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 5}). // Match terraform execution capacity
@@ -1457,6 +1469,9 @@ func (r *WorkspaceReconciler) initializeObservedResourceState(ctx context.Contex
 		old := latest.DeepCopy()
 		latest.Status.ObservedGeneration = latest.Generation
 		latest.Status.ObservedMetadataHash = metadataHash
+		// Match the backoff() invariant: clear the freshness timestamp so the
+		// retry is not skipped by the freshness guard once NextRetryTime expires.
+		latest.Status.NextRefreshTimestamp = metav1.Time{}
 
 		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
 			return err

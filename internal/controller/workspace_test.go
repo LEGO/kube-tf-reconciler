@@ -952,6 +952,7 @@ resource "random_pet" "name" {
 
 			require.NotEmpty(t, wsAfter.Status.ObservedMetadataHash)
 			require.Equal(t, workspaceMetadataHash(&wsAfter), wsAfter.Status.ObservedMetadataHash)
+			require.True(t, wsAfter.Status.NextRefreshTimestamp.IsZero())
 
 			// Backoff should remain intact
 			require.Equal(t, int32(3), wsAfter.Status.Backoff.RetryCount)
