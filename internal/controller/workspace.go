@@ -292,19 +292,19 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	var annotationPatched bool
-	if res, err, ret, annotationPatched = r.handleReschedule(ctx, ws); ret {
+	var rescheduleObservedHash string
+	if res, err, ret, rescheduleObservedHash = r.handleReschedule(ctx, ws); ret {
 		if err != nil {
 			err = fmt.Errorf("handleReschedule: %w", err)
-			// Choose the hash that reflects what is actually on the API server at the point
-			// of failure, so the next reconcile does not see a spurious hash mismatch:
-			//   - annotationPatched=false: the annotation Patch failed, ws was mutated in
-			//     memory but the API server still has the annotation → use attemptMetadataHash.
-			//   - annotationPatched=true: the annotation Patch succeeded; ws was re-fetched
-			//     inside the retry loop so workspaceMetadataHash(ws) matches the server state.
+			// rescheduleObservedHash is the metadata hash snapshotted after controller-owned
+			// annotation removal, before any re-fetch. It is non-empty only when the
+			// annotation Patch succeeded (server no longer has the annotation).
+			//   - empty: annotation Patch failed → server still has the annotation → use attemptMetadataHash.
+			//   - non-empty: annotation removed on server → use the snapshot so a concurrent
+			//     metadata update that arrived while Terraform ran is not silently absorbed.
 			hashForBackoff := attemptMetadataHash
-			if annotationPatched {
-				hashForBackoff = workspaceMetadataHash(ws)
+			if rescheduleObservedHash != "" {
+				hashForBackoff = rescheduleObservedHash
 			}
 			r.backoff(ctx, ws, attemptGeneration, hashForBackoff)
 		}
@@ -763,14 +763,16 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 	return ctrl.Result{}, nil, false
 }
 
-// handleReschedule returns (result, error, earlyReturn, annotationPatched).
-// annotationPatched is true only after the annotation-removal Patch has succeeded;
-// callers use it to choose the correct hash for backoff when a later step fails.
-func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool, bool) {
+// handleReschedule returns (result, error, earlyReturn, observedMetadataHash).
+// observedMetadataHash is the metadata hash snapshotted after controller-owned annotation
+// removal (before any re-fetch in the status retry loop). It is non-empty only when the
+// annotation-removal Patch succeeded; callers use it as the backoff baseline on failure so
+// a concurrent metadata update that arrived while Terraform ran is not silently absorbed.
+func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool, string) {
 	log := logf.FromContext(ctx)
 
 	if !ws.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil, false, false
+		return ctrl.Result{}, nil, false, ""
 	}
 
 	log.V(DebugLevel).Info("reschedule starting")
@@ -779,12 +781,17 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 	old := ws.DeepCopy()
 
 	delete(ws.Annotations, tfv1alphav1.ManualApplyAnnotation)
+	// Snapshot the hash after removing the controller-owned annotation, before the
+	// status retry loop re-fetches ws. This is the metadata state this reconcile
+	// actually observed, so a concurrent user change that arrived while Terraform
+	// was running is not silently marked as observed.
+	observedMetadataHash := workspaceMetadataHash(ws)
+
 	err := r.Client.Patch(ctx, ws, client.MergeFrom(old))
 	if err != nil {
 		// Patch failed: ws was mutated in memory but the API server still has the
-		// annotation. Signal annotationPatched=false so the caller uses the
-		// pre-reconcile hash as the backoff baseline.
-		return ctrl.Result{}, fmt.Errorf("failed to patch workspace during cleanup: %w", err), true, false
+		// annotation. Return empty hash so the caller falls back to attemptMetadataHash.
+		return ctrl.Result{}, fmt.Errorf("failed to patch workspace during cleanup: %w", err), true, ""
 	}
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -794,23 +801,21 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 
 		old = ws.DeepCopy()
 		ws.Status.ObservedGeneration = ws.Generation
-		ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+		ws.Status.ObservedMetadataHash = observedMetadataHash
 		ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(nextRefreshInterval))
 
 		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	})
 	if err != nil {
-		// Annotation was removed from the server; ws was re-fetched. Signal
-		// annotationPatched=true so the caller uses workspaceMetadataHash(ws).
-		return ctrl.Result{}, fmt.Errorf("failed to patch workspace status during cleanup: %w", err), true, true
+		return ctrl.Result{}, fmt.Errorf("failed to patch workspace status during cleanup: %w", err), true, observedMetadataHash
 	}
 
 	err = r.cleanupOldPlans(ctx, ws)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to cleanup old plans: %w", err), true, true
+		return ctrl.Result{}, fmt.Errorf("failed to cleanup old plans: %w", err), true, observedMetadataHash
 	}
 
-	return ctrl.Result{}, nil, false, false
+	return ctrl.Result{}, nil, false, ""
 }
 
 // SetupWithManager sets up the controller with the Manager.
