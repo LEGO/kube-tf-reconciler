@@ -556,19 +556,19 @@ func TestWorkspaceMetadataHash(t *testing.T) {
 	}
 	baseHash := workspaceMetadataHash(base)
 
-	t.Run("ManualApplyAnnotation does not affect hash", func(t *testing.T) {
+	t.Run("ManualApplyAnnotation affects hash", func(t *testing.T) {
 		ws := base.DeepCopy()
 		ws.Annotations[tfv1alphav1.ManualApplyAnnotation] = "true"
-		require.Equal(t, baseHash, workspaceMetadataHash(ws))
+		require.NotEqual(t, baseHash, workspaceMetadataHash(ws))
 	})
 
-	t.Run("ManualDestroyAnnotation does not affect hash", func(t *testing.T) {
+	t.Run("ManualDestroyAnnotation affects hash", func(t *testing.T) {
 		ws := base.DeepCopy()
 		ws.Annotations[tfv1alphav1.ManualDestroyAnnotation] = "true"
-		require.Equal(t, baseHash, workspaceMetadataHash(ws))
+		require.NotEqual(t, baseHash, workspaceMetadataHash(ws))
 	})
 
-	t.Run("other annotation change does affect hash", func(t *testing.T) {
+	t.Run("other annotation change affects hash", func(t *testing.T) {
 		ws := base.DeepCopy()
 		ws.Annotations["example.com/foo"] = "changed"
 		require.NotEqual(t, baseHash, workspaceMetadataHash(ws))
@@ -585,17 +585,16 @@ func TestWorkspaceMetadataHash(t *testing.T) {
 		require.Equal(t, workspaceMetadataHash(nilMeta), workspaceMetadataHash(emptyMeta))
 	})
 
-	t.Run("workspace with only ignored annotations hashes same as no annotations", func(t *testing.T) {
+	t.Run("only kubectl annotation is ignored in hash", func(t *testing.T) {
 		noAnnotations := &tfv1alphav1.Workspace{}
-		onlyIgnored := &tfv1alphav1.Workspace{
+		onlyKubectl := &tfv1alphav1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: map[string]string{
-					tfv1alphav1.ManualApplyAnnotation:   "true",
-					tfv1alphav1.ManualDestroyAnnotation: "true",
+					"kubectl.kubernetes.io/last-applied-configuration": "{}",
 				},
 			},
 		}
-		require.Equal(t, workspaceMetadataHash(noAnnotations), workspaceMetadataHash(onlyIgnored))
+		require.Equal(t, workspaceMetadataHash(noAnnotations), workspaceMetadataHash(onlyKubectl))
 	})
 }
 
@@ -961,45 +960,32 @@ resource "random_pet" "name" {
 			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
 		})
 
-		t.Run("clears backoff for manual apply annotation even when hash is unchanged", func(t *testing.T) {
-			ws := newWs("test-backoff-manual-apply-no-hash-change", modHost.ModuleSource("my-module"))
+		t.Run("honors backoff when failed manual action annotation remains from previous attempt", func(t *testing.T) {
+			// Simulates: manual-apply was attempted, failed, and backoff was set with the
+			// annotation already present in the hash. The annotation is still there on the
+			// next reconcile. Because the hash matches, backoff must be honored — not cleared
+			// — so the controller does not immediately retry the same failing action on every
+			// reconcile while the annotation stays in place.
+			ws := newWs("test-backoff-manual-apply-remains", modHost.ModuleSource("my-module"))
 			ws.Generation = 1
 			ws.Status.ObservedGeneration = 1
 
 			if ws.Annotations == nil {
 				ws.Annotations = map[string]string{}
 			}
-			ws.Annotations["example.com/existing"] = "value"
-			// Set hash AFTER existing annotations but BEFORE manual-apply, so the hash
-			// does not change when manual-apply is added (it's excluded from the hash).
-			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
 			ws.Annotations[tfv1alphav1.ManualApplyAnnotation] = "true"
+			// ObservedMetadataHash is set WITH the annotation, simulating that backoff() was
+			// called while the annotation was already present (i.e. a previous failed attempt).
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
 
-			ws.Status.Backoff.RetryCount = 3
+			ws.Status.Backoff.RetryCount = 1
 			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
 			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
-
-			// Confirm the hash truly did not change
-			require.Equal(t, ws.Status.ObservedMetadataHash, workspaceMetadataHash(ws))
-
-			now := metav1.NewMicroTime(time.Now())
-			otherLease := &coordinationv1.Lease{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      leaseName(ws),
-					Namespace: ws.Namespace,
-				},
-				Spec: coordinationv1.LeaseSpec{
-					HolderIdentity:       ptr.To("someone-else"),
-					LeaseDurationSeconds: ptr.To[int32](300),
-					AcquireTime:          &now,
-					RenewTime:            &now,
-				},
-			}
 
 			c := clientfake.NewClientBuilder().
 				WithScheme(scheme).
 				WithStatusSubresource(ws).
-				WithObjects(ws, otherLease).
+				WithObjects(ws).
 				Build()
 
 			r := &WorkspaceReconciler{
@@ -1011,10 +997,14 @@ resource "random_pet" "name" {
 				Renderer: render.NewFileRender(t.TempDir()),
 			}
 
-			_, err := r.Reconcile(t.Context(), reconcile.Request{
+			res, err := r.Reconcile(t.Context(), reconcile.Request{
 				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
 			})
 			require.NoError(t, err)
+
+			// Backoff must be honored, not cleared — annotation was already the baseline.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, nextRefreshInterval)
 
 			var wsAfter tfv1alphav1.Workspace
 			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
@@ -1022,8 +1012,8 @@ resource "random_pet" "name" {
 				Name:      ws.Name,
 			}, &wsAfter))
 
-			require.Equal(t, int32(0), wsAfter.Status.Backoff.RetryCount)
-			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
+			require.Equal(t, int32(1), wsAfter.Status.Backoff.RetryCount)
+			require.NotNil(t, wsAfter.Status.Backoff.NextRetryTime)
 		})
 
 		t.Run("clears backoff for legacy object with empty observed metadata hash", func(t *testing.T) {

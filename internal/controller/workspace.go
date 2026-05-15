@@ -74,14 +74,9 @@ var ignoredWatchAnnotations = []string{
 	"kubectl.kubernetes.io/last-applied-configuration",
 }
 
-// ignoredHashAnnotations are excluded from workspaceMetadataHash. This is a superset of
-// ignoredWatchAnnotations: controller-lifecycle annotations (manual-apply/destroy) are also
-// excluded so the controller's own cleanup of these annotations does not create a spurious
-// hash mismatch that would incorrectly clear backoff on the next reconcile.
+// ignoredHashAnnotations are excluded from workspaceMetadataHash.
 var ignoredHashAnnotations = []string{
 	"kubectl.kubernetes.io/last-applied-configuration",
-	tfv1alphav1.ManualApplyAnnotation,
-	tfv1alphav1.ManualDestroyAnnotation,
 }
 
 func isNil(arg any) bool {
@@ -205,11 +200,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 		} else {
 			resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
-				ws.Status.ObservedMetadataHash != metadataHash ||
-				ws.ManualApplyRequested() || ws.ManualDestroyRequested()
+				ws.Status.ObservedMetadataHash != metadataHash
 
 			if resourceChanged {
-				// Resource was changed by the user (spec, metadata, or explicit action annotation) — clear backoff and proceed immediately
+				// Resource was changed by the user (spec or metadata, including action annotations) — clear backoff and proceed immediately
 				if err := r.clearBackoff(ctx, ws); err != nil {
 					return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
 				}
@@ -298,10 +292,21 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	if res, err, ret = r.handleReschedule(ctx, ws); ret {
+	var annotationPatched bool
+	if res, err, ret, annotationPatched = r.handleReschedule(ctx, ws); ret {
 		if err != nil {
 			err = fmt.Errorf("handleReschedule: %w", err)
-			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
+			// Choose the hash that reflects what is actually on the API server at the point
+			// of failure, so the next reconcile does not see a spurious hash mismatch:
+			//   - annotationPatched=false: the annotation Patch failed, ws was mutated in
+			//     memory but the API server still has the annotation → use attemptMetadataHash.
+			//   - annotationPatched=true: the annotation Patch succeeded; ws was re-fetched
+			//     inside the retry loop so workspaceMetadataHash(ws) matches the server state.
+			hashForBackoff := attemptMetadataHash
+			if annotationPatched {
+				hashForBackoff = workspaceMetadataHash(ws)
+			}
+			r.backoff(ctx, ws, attemptGeneration, hashForBackoff)
 		}
 
 		return res, err
@@ -758,11 +763,14 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool) {
+// handleReschedule returns (result, error, earlyReturn, annotationPatched).
+// annotationPatched is true only after the annotation-removal Patch has succeeded;
+// callers use it to choose the correct hash for backoff when a later step fails.
+func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool, bool) {
 	log := logf.FromContext(ctx)
 
 	if !ws.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil, false
+		return ctrl.Result{}, nil, false, false
 	}
 
 	log.V(DebugLevel).Info("reschedule starting")
@@ -773,7 +781,10 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 	delete(ws.Annotations, tfv1alphav1.ManualApplyAnnotation)
 	err := r.Client.Patch(ctx, ws, client.MergeFrom(old))
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to patch workspace during cleanup: %w", err), true
+		// Patch failed: ws was mutated in memory but the API server still has the
+		// annotation. Signal annotationPatched=false so the caller uses the
+		// pre-reconcile hash as the backoff baseline.
+		return ctrl.Result{}, fmt.Errorf("failed to patch workspace during cleanup: %w", err), true, false
 	}
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -789,15 +800,17 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	})
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to patch workspace status during cleanup: %w", err), true
+		// Annotation was removed from the server; ws was re-fetched. Signal
+		// annotationPatched=true so the caller uses workspaceMetadataHash(ws).
+		return ctrl.Result{}, fmt.Errorf("failed to patch workspace status during cleanup: %w", err), true, true
 	}
 
 	err = r.cleanupOldPlans(ctx, ws)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to cleanup old plans: %w", err), true
+		return ctrl.Result{}, fmt.Errorf("failed to cleanup old plans: %w", err), true, true
 	}
 
-	return ctrl.Result{}, nil, false
+	return ctrl.Result{}, nil, false, false
 }
 
 // SetupWithManager sets up the controller with the Manager.
