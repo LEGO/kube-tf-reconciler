@@ -2,6 +2,7 @@
 .idea
 bin/*
 .testdata/
+result
 
 # Docs artifacts
 .pages/resources
