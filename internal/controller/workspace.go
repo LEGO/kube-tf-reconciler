@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -65,6 +68,17 @@ const (
 	TFPhaseErrored      = "Errored"
 )
 
+// ignoredWatchAnnotations are stripped before the annotation-changed predicate
+// compares old vs new, preventing tooling-managed annotations from triggering spurious reconciles.
+var ignoredWatchAnnotations = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+}
+
+// ignoredHashAnnotations are excluded from workspaceMetadataHash.
+var ignoredHashAnnotations = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+}
+
 func isNil(arg any) bool {
 	if v := reflect.ValueOf(arg); !v.IsValid() || ((v.Kind() == reflect.Ptr ||
 		v.Kind() == reflect.Interface ||
@@ -85,6 +99,17 @@ type TypedAnnotationChangedPredicate[object metav1.Object] struct {
 	predicate.TypedFuncs[object]
 }
 
+// DeletionTimestampChangedPredicate passes update events where DeletionTimestamp
+// transitions from nil to non-nil, ensuring a deleted Workspace is reconciled
+// immediately rather than waiting for the next scheduled retry.
+type DeletionTimestampChangedPredicate struct {
+	predicate.Funcs
+}
+
+func (DeletionTimestampChangedPredicate) Update(e event.UpdateEvent) bool {
+	return e.ObjectOld.GetDeletionTimestamp().IsZero() && !e.ObjectNew.GetDeletionTimestamp().IsZero()
+}
+
 // Update implements default UpdateEvent filter for validating annotation
 // change, allowing to ignore some annotations.
 func (TypedAnnotationChangedPredicate[object]) Update(e event.TypedUpdateEvent[object]) bool {
@@ -100,11 +125,7 @@ func (TypedAnnotationChangedPredicate[object]) Update(e event.TypedUpdateEvent[o
 	newAnnotations := maps.Clone(e.ObjectNew.GetAnnotations())
 	oldAnnotations := maps.Clone(e.ObjectOld.GetAnnotations())
 
-	ignoreAnnotations := []string{
-		"kubectl.kubernetes.io/last-applied-configuration",
-	}
-
-	for _, annotation := range ignoreAnnotations {
+	for _, annotation := range ignoredWatchAnnotations {
 		delete(newAnnotations, annotation)
 		delete(oldAnnotations, annotation)
 	}
@@ -135,6 +156,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
+	// Snapshot the resource state observed at the start of this reconcile attempt.
+	// Passed to backoff() so it records what this attempt actually ran on, not a
+	// later version that may have arrived while terraform was executing.
+	attemptGeneration := ws.Generation
+	attemptMetadataHash := workspaceMetadataHash(ws)
+
 	// Record the last result phase in metrics
 	switch ws.Status.TerraformPhase {
 	case TFPhaseErrored:
@@ -150,8 +177,41 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
-		slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
-		return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+		metadataHash := workspaceMetadataHash(ws)
+
+		if !ws.DeletionTimestamp.IsZero() {
+			// Deletion takes priority over backoff — clear it so handleDeletionAndFinalizers runs immediately.
+			if err := r.clearBackoff(ctx, ws); err != nil {
+				return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
+			}
+		} else if ws.Status.ObservedMetadataHash == "" {
+			// No hash baseline: cannot determine whether this reconcile was triggered by a
+			// metadata-only user change or by a scheduled retry, so we cannot safely preserve
+			// backoff — the user change would be absorbed as the new baseline and remain blocked.
+			//
+			// Tradeoff: a controller restart will also hit this branch for any object whose
+			// ObservedMetadataHash was never set (i.e. objects that entered backoff before this
+			// field was introduced), causing their backoff to be cleared immediately rather than
+			// preserved across the restart. This is accepted as a one-time migration cost: once
+			// any object passes through backoff() or clearBackoff() the hash is written and this
+			// branch is never reached again for that object.
+			if err := r.clearBackoff(ctx, ws); err != nil {
+				return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
+			}
+		} else {
+			resourceChanged := ws.Generation != ws.Status.ObservedGeneration ||
+				ws.Status.ObservedMetadataHash != metadataHash
+
+			if resourceChanged {
+				// Resource was changed by the user (spec or metadata, including action annotations) — clear backoff and proceed immediately
+				if err := r.clearBackoff(ctx, ws); err != nil {
+					return ctrl.Result{}, fmt.Errorf("clear backoff: %w", err)
+				}
+			} else {
+				slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
+				return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
+			}
+		}
 	}
 
 	// Attempt to acquire lease, if we don't get it, then we don't proceed
@@ -170,7 +230,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}()
 
 	logf.IntoContext(ctx, log.WithValues("workspace", req.String()))
-	if ws.Status.ObservedGeneration == ws.Generation && time.Now().Before(ws.Status.NextRefreshTimestamp.Time) && !ws.ManualApplyRequested() {
+	if ws.Status.ObservedGeneration == ws.Generation && time.Now().Before(ws.Status.NextRefreshTimestamp.Time) && !ws.ManualApplyRequested() && !ws.ManualDestroyRequested() && ws.DeletionTimestamp.IsZero() {
 		return ctrl.Result{RequeueAfter: time.Until(ws.Status.NextRefreshTimestamp.Time)}, nil
 	}
 
@@ -181,7 +241,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if ret {
 		if err != nil {
 			err = fmt.Errorf("setupTerraformForWorkspace: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -190,7 +250,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handleRendering(ctx, ws); ret {
 		if err != nil {
 			err = fmt.Errorf("handleRendering: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -199,7 +259,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handleRefreshDependencies(ctx, ws, tf); ret {
 		if err != nil {
 			err = fmt.Errorf("handleRefreshDependencies: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -208,7 +268,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handleDeletionAndFinalizers(ctx, ws, tf); ret {
 		if err != nil {
 			err = fmt.Errorf("handleDeletionAndFinalizers: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -217,7 +277,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handlePlan(ctx, ws, tf); ret {
 		if err != nil {
 			err = fmt.Errorf("handlePlan: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
@@ -226,16 +286,27 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if res, err, ret = r.handleApply(ctx, ws, tf); ret {
 		if err != nil {
 			err = fmt.Errorf("handleApply: %w", err)
-			r.backoff(ctx, ws)
+			r.backoff(ctx, ws, attemptGeneration, attemptMetadataHash)
 		}
 
 		return res, err
 	}
 
-	if res, err, ret = r.handleReschedule(ctx, ws); ret {
+	var rescheduleObservedHash string
+	if res, err, ret, rescheduleObservedHash = r.handleReschedule(ctx, ws); ret {
 		if err != nil {
 			err = fmt.Errorf("handleReschedule: %w", err)
-			r.backoff(ctx, ws)
+			// rescheduleObservedHash is the metadata hash snapshotted after controller-owned
+			// annotation removal, before any re-fetch. It is non-empty only when the
+			// annotation Patch succeeded (server no longer has the annotation).
+			//   - empty: annotation Patch failed → server still has the annotation → use attemptMetadataHash.
+			//   - non-empty: annotation removed on server → use the snapshot so a concurrent
+			//     metadata update that arrived while Terraform ran is not silently absorbed.
+			hashForBackoff := attemptMetadataHash
+			if rescheduleObservedHash != "" {
+				hashForBackoff = rescheduleObservedHash
+			}
+			r.backoff(ctx, ws, attemptGeneration, hashForBackoff)
 		}
 
 		return res, err
@@ -692,11 +763,16 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool) {
+// handleReschedule returns (result, error, earlyReturn, observedMetadataHash).
+// observedMetadataHash is the metadata hash snapshotted after controller-owned annotation
+// removal (before any re-fetch in the status retry loop). It is non-empty only when the
+// annotation-removal Patch succeeded; callers use it as the backoff baseline on failure so
+// a concurrent metadata update that arrived while Terraform ran is not silently absorbed.
+func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool, string) {
 	log := logf.FromContext(ctx)
 
 	if !ws.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil, false
+		return ctrl.Result{}, nil, false, ""
 	}
 
 	log.V(DebugLevel).Info("reschedule starting")
@@ -705,9 +781,17 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 	old := ws.DeepCopy()
 
 	delete(ws.Annotations, tfv1alphav1.ManualApplyAnnotation)
+	// Snapshot the hash after removing the controller-owned annotation, before the
+	// status retry loop re-fetches ws. This is the metadata state this reconcile
+	// actually observed, so a concurrent user change that arrived while Terraform
+	// was running is not silently marked as observed.
+	observedMetadataHash := workspaceMetadataHash(ws)
+
 	err := r.Client.Patch(ctx, ws, client.MergeFrom(old))
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to patch workspace during cleanup: %w", err), true
+		// Patch failed: ws was mutated in memory but the API server still has the
+		// annotation. Return empty hash so the caller falls back to attemptMetadataHash.
+		return ctrl.Result{}, fmt.Errorf("failed to patch workspace during cleanup: %w", err), true, ""
 	}
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -717,20 +801,21 @@ func (r *WorkspaceReconciler) handleReschedule(ctx context.Context, ws *tfv1alph
 
 		old = ws.DeepCopy()
 		ws.Status.ObservedGeneration = ws.Generation
+		ws.Status.ObservedMetadataHash = observedMetadataHash
 		ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(nextRefreshInterval))
 
 		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
 	})
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to patch workspace status during cleanup: %w", err), true
+		return ctrl.Result{}, fmt.Errorf("failed to patch workspace status during cleanup: %w", err), true, observedMetadataHash
 	}
 
 	err = r.cleanupOldPlans(ctx, ws)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to cleanup old plans: %w", err), true
+		return ctrl.Result{}, fmt.Errorf("failed to cleanup old plans: %w", err), true, observedMetadataHash
 	}
 
-	return ctrl.Result{}, nil, false
+	return ctrl.Result{}, nil, false, ""
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -744,6 +829,7 @@ func (r *WorkspaceReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Man
 				predicate.GenerationChangedPredicate{},
 				predicate.LabelChangedPredicate{},
 				AnnotationChangedPredicate{},
+				DeletionTimestampChangedPredicate{},
 			),
 		)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 5}). // Match terraform execution capacity
@@ -1307,14 +1393,128 @@ func (r *WorkspaceReconciler) streamOutput(ctx context.Context, ws *tfv1alphav1.
 	return outputCh, wg
 }
 
-func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace) {
-	old := ws.DeepCopy()
-	backoff := math.Pow(2, float64(ws.Status.Backoff.RetryCount)) * 30
-	backoffDuration := time.Duration(math.Min(backoff, 20*60)) * time.Second
-	ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoffDuration)}
-	ws.Status.Backoff.RetryCount++
-	backoffErr := r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+func (r *WorkspaceReconciler) clearBackoff(ctx context.Context, ws *tfv1alphav1.Workspace) error {
+	key := types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &tfv1alphav1.Workspace{}
+		if err := r.Client.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		old := latest.DeepCopy()
+		latest.Status.Backoff.NextRetryTime = nil
+		latest.Status.Backoff.RetryCount = 0
+		latest.Status.ObservedMetadataHash = workspaceMetadataHash(latest)
+		latest.Status.NextRefreshTimestamp = metav1.Time{}
+		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
+			return err
+		}
+		*ws = *latest.DeepCopy()
+		return nil
+	})
+}
+
+func (r *WorkspaceReconciler) backoff(ctx context.Context, ws *tfv1alphav1.Workspace, observedGeneration int64, observedMetadataHash string) {
+	key := types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name}
+	backoffErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &tfv1alphav1.Workspace{}
+		if err := r.Client.Get(ctx, key, latest); err != nil {
+			return err
+		}
+
+		old := latest.DeepCopy()
+		backoff := math.Pow(2, float64(latest.Status.Backoff.RetryCount)) * 30
+		backoffDuration := time.Duration(math.Min(backoff, 20*60)) * time.Second
+		latest.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(backoffDuration)}
+		latest.Status.Backoff.RetryCount++
+
+		// Record the resource state this attempt actually observed (snapshotted at
+		// reconcile start, not from the fresh Get above) so a user change that
+		// arrived while terraform was running is not silently absorbed as the
+		// backoff baseline and wrongly treated as unchanged by the backoff gate.
+		latest.Status.ObservedGeneration = observedGeneration
+		latest.Status.ObservedMetadataHash = observedMetadataHash
+		// Clear the freshness timestamp so the retry is not skipped by the
+		// freshness guard once NextRetryTime expires.
+		latest.Status.NextRefreshTimestamp = metav1.Time{}
+
+		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
+			return err
+		}
+
+		*ws = *latest.DeepCopy()
+		return nil
+	})
 	if backoffErr != nil {
 		slog.ErrorContext(ctx, "failed to update backoff status", "error", backoffErr.Error())
 	}
+}
+
+func isIgnoredWorkspaceAnnotation(key string) bool {
+	for _, ignoredKey := range ignoredHashAnnotations {
+		if key == ignoredKey {
+			return true
+		}
+	}
+
+	return false
+}
+
+func workspaceMetadataHash(ws *tfv1alphav1.Workspace) string {
+	ann := maps.Clone(ws.GetAnnotations())
+	for k := range ann {
+		if isIgnoredWorkspaceAnnotation(k) {
+			delete(ann, k)
+		}
+	}
+	if ann == nil {
+		ann = map[string]string{}
+	}
+
+	lbl := maps.Clone(ws.GetLabels())
+	if lbl == nil {
+		lbl = map[string]string{}
+	}
+
+	data, _ := json.Marshal(struct {
+		Annotations map[string]string `json:"a"`
+		Labels      map[string]string `json:"l"`
+	}{
+		Annotations: ann,
+		Labels:      lbl,
+	})
+
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (r *WorkspaceReconciler) initializeObservedResourceState(ctx context.Context, ws *tfv1alphav1.Workspace, observedGeneration int64, metadataHash string) error {
+	key := types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &tfv1alphav1.Workspace{}
+		if err := r.Client.Get(ctx, key, latest); err != nil {
+			return err
+		}
+
+		if latest.Status.ObservedMetadataHash != "" {
+			*ws = *latest.DeepCopy()
+			return nil
+		}
+
+		old := latest.DeepCopy()
+		// Use the generation seen at the start of the backoff block, not latest.Generation,
+		// so a spec update that arrived during this retry does not get silently marked as
+		// observed without having been reconciled.
+		latest.Status.ObservedGeneration = observedGeneration
+		latest.Status.ObservedMetadataHash = metadataHash
+		// Match the backoff() invariant: clear the freshness timestamp so the
+		// retry is not skipped by the freshness guard once NextRetryTime expires.
+		latest.Status.NextRefreshTimestamp = metav1.Time{}
+
+		if err := r.Client.Status().Patch(ctx, latest, client.MergeFrom(old)); err != nil {
+			return err
+		}
+
+		*ws = *latest.DeepCopy()
+		return nil
+	})
 }

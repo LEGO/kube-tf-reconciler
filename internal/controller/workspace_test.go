@@ -56,6 +56,7 @@ func TestWorkspaceController(t *testing.T) {
 	}
 
 	modHost, shutdown := testutils.NewModuleHost()
+	t.Cleanup(shutdown)
 
 	err := tfv1alphav1.AddToScheme(testEnv.Scheme)
 	assert.NoError(t, err)
@@ -63,9 +64,12 @@ func TestWorkspaceController(t *testing.T) {
 	err = coordinationv1.AddToScheme(testEnv.Scheme)
 	assert.NoError(t, err)
 
+	tfHome := t.TempDir()
+	t.Setenv("HOME", tfHome)
+
 	cfg, err := testEnv.Start()
-	assert.NoError(t, err)
-	assert.NotNil(t, cfg)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
 	k, err := klient.New(cfg)
 	assert.NoError(t, err)
 
@@ -100,7 +104,6 @@ func TestWorkspaceController(t *testing.T) {
 
 	t.Cleanup(func() {
 		cancel()
-		shutdown()
 		assert.NoError(t, testEnv.Stop())
 		assert.NoError(t, os.RemoveAll(filepath.Join(rootDir, "workspaces")))
 	})
@@ -445,9 +448,12 @@ resource "random_pet" "name" {
 		}), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
-		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
-		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to execute terraform plan")
-		assert.NotNil(t, ws.Status.LastErrorTime)
+		var got tfv1alphav1.Workspace
+		assert.NoError(t, k.Resources().Get(ctx, ws.GetName(), ws.GetNamespace(), &got))
+
+		assert.Equal(t, TFPhaseErrored, got.Status.TerraformPhase)
+		assert.Contains(t, got.Status.LastErrorMessage, "Failed to execute terraform plan")
+		assert.NotNil(t, got.Status.LastErrorTime)
 	})
 
 	t.Run("error message persisted on terraform apply failure", func(t *testing.T) {
@@ -456,7 +462,7 @@ resource "random_pet" "name" {
 		// This uses a null_resource with a local-exec provisioner that will fail
 		applyFailModule := `resource "null_resource" "fail" {
   provisioner "local-exec" {
-    command = "exit 1"
+    command = "sh -c 'exit 1'"
   }
 }`
 		modHost.AddFileToModule("apply-fail-module", "main.tf", applyFailModule)
@@ -472,18 +478,22 @@ resource "random_pet" "name" {
 		})
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		waitErr := wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			w := object.(*tfv1alphav1.Workspace)
 			return w.Status.TerraformPhase == TFPhaseErrored &&
 				w.Status.LastErrorMessage != "" &&
-				w.Status.LastErrorTime != nil
+				w.Status.LastErrorTime != nil &&
+				w.Status.LastApplyOutput != ""
 		}), wait.WithContext(ctx))
-		assert.NoError(t, err)
+		assert.NoError(t, waitErr)
 
-		assert.Equal(t, TFPhaseErrored, ws.Status.TerraformPhase)
-		assert.Contains(t, ws.Status.LastErrorMessage, "Failed to apply terraform")
-		assert.NotNil(t, ws.Status.LastErrorTime)
-		assert.NotEmpty(t, ws.Status.LastApplyOutput)
+		var got tfv1alphav1.Workspace
+		assert.NoError(t, k.Resources().Get(ctx, ws.GetName(), ws.GetNamespace(), &got))
+
+		assert.Equal(t, TFPhaseErrored, got.Status.TerraformPhase)
+		assert.Contains(t, got.Status.LastErrorMessage, "Failed to apply terraform")
+		assert.NotNil(t, got.Status.LastErrorTime)
+		assert.NotEmpty(t, got.Status.LastApplyOutput)
 	})
 
 	t.Run("error message cleared on successful reconciliation", func(t *testing.T) {
@@ -538,6 +548,56 @@ func newWs(name, moduleSource string) *tfv1alphav1.Workspace {
 	}
 }
 
+func TestWorkspaceMetadataHash(t *testing.T) {
+	base := &tfv1alphav1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{"example.com/foo": "bar"},
+		},
+	}
+	baseHash := workspaceMetadataHash(base)
+
+	t.Run("ManualApplyAnnotation affects hash", func(t *testing.T) {
+		ws := base.DeepCopy()
+		ws.Annotations[tfv1alphav1.ManualApplyAnnotation] = "true"
+		require.NotEqual(t, baseHash, workspaceMetadataHash(ws))
+	})
+
+	t.Run("ManualDestroyAnnotation affects hash", func(t *testing.T) {
+		ws := base.DeepCopy()
+		ws.Annotations[tfv1alphav1.ManualDestroyAnnotation] = "true"
+		require.NotEqual(t, baseHash, workspaceMetadataHash(ws))
+	})
+
+	t.Run("other annotation change affects hash", func(t *testing.T) {
+		ws := base.DeepCopy()
+		ws.Annotations["example.com/foo"] = "changed"
+		require.NotEqual(t, baseHash, workspaceMetadataHash(ws))
+	})
+
+	t.Run("nil and empty metadata maps hash identically", func(t *testing.T) {
+		nilMeta := &tfv1alphav1.Workspace{}
+		emptyMeta := &tfv1alphav1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{},
+				Labels:      map[string]string{},
+			},
+		}
+		require.Equal(t, workspaceMetadataHash(nilMeta), workspaceMetadataHash(emptyMeta))
+	})
+
+	t.Run("only kubectl annotation is ignored in hash", func(t *testing.T) {
+		noAnnotations := &tfv1alphav1.Workspace{}
+		onlyKubectl := &tfv1alphav1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"kubectl.kubernetes.io/last-applied-configuration": "{}",
+				},
+			},
+		}
+		require.Equal(t, workspaceMetadataHash(noAnnotations), workspaceMetadataHash(onlyKubectl))
+	})
+}
+
 func TestLeaseReconciliationBehaviour(t *testing.T) {
 	modHost, shutdown := testutils.NewModuleHost()
 	defer shutdown()
@@ -558,6 +618,9 @@ resource "random_pet" "name" {
 	require.NoError(t, v1.AddToScheme(scheme))
 	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
 	require.NoError(t, coordinationv1.AddToScheme(scheme))
+
+	tfHome := t.TempDir()
+	t.Setenv("HOME", tfHome)
 
 	freeWs := newWs("test-free", modHost.ModuleSource("my-module"))
 	lockedWs := newWs("test-locked", modHost.ModuleSource("my-module"))
@@ -733,5 +796,526 @@ resource "random_pet" "name" {
 			Namespace: freeWs.Namespace,
 		}, &plan)
 		assert.NoError(t, err)
+	})
+
+	t.Run("backoff gate", func(t *testing.T) {
+		t.Run("applies backoff when resource unchanged", func(t *testing.T) {
+			ws := newWs("test-backoff-unchanged", modHost.ModuleSource("my-module"))
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 1
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			res, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			// Should return due to backoff: positive and well below the 30-min refresh interval.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, nextRefreshInterval)
+		})
+
+		t.Run("does not apply backoff when resource changed; clears backoff", func(t *testing.T) {
+			ws := newWs("test-backoff-changed", modHost.ModuleSource("my-module"))
+			ws.Generation = 2 // changed
+			ws.Status.ObservedGeneration = 1
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			// Force reconcile to exit at lease acquisition (no terraform)
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			_, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			// Backoff must be cleared in stored object
+			var wsAfter tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfter))
+
+			require.Equal(t, int32(0), wsAfter.Status.Backoff.RetryCount)
+			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
+		})
+
+		t.Run("does not apply backoff when only metadata changed; clears backoff", func(t *testing.T) {
+			ws := newWs("test-backoff-metadata-changed", modHost.ModuleSource("my-module"))
+
+			// Spec unchanged => generation unchanged
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 1
+
+			if ws.Labels == nil {
+				ws.Labels = map[string]string{}
+			}
+
+			if ws.Annotations == nil {
+				ws.Annotations = map[string]string{}
+			}
+			// Simulate previously observed metadata
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+
+			// Now simulate a user metadata-only update (labels/annotations)
+			ws.Annotations["example.com/trigger-reconcile"] = "new-value"
+
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			require.NotEqual(t, ws.Status.ObservedMetadataHash, workspaceMetadataHash(ws))
+
+			// Force reconcile to exit at lease acquisition (no terraform), same trick as your other test
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			_, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			// Backoff must be cleared in stored object
+			var wsAfter tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfter))
+
+			require.Equal(t, int32(0), wsAfter.Status.Backoff.RetryCount)
+			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
+		})
+
+		t.Run("honors backoff when failed manual action annotation remains from previous attempt", func(t *testing.T) {
+			// Simulates: manual-apply was attempted, failed, and backoff was set with the
+			// annotation already present in the hash. The annotation is still there on the
+			// next reconcile. Because the hash matches, backoff must be honored — not cleared
+			// — so the controller does not immediately retry the same failing action on every
+			// reconcile while the annotation stays in place.
+			ws := newWs("test-backoff-manual-apply-remains", modHost.ModuleSource("my-module"))
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 1
+
+			if ws.Annotations == nil {
+				ws.Annotations = map[string]string{}
+			}
+			ws.Annotations[tfv1alphav1.ManualApplyAnnotation] = "true"
+			// ObservedMetadataHash is set WITH the annotation, simulating that backoff() was
+			// called while the annotation was already present (i.e. a previous failed attempt).
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+
+			ws.Status.Backoff.RetryCount = 1
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			res, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			// Backoff must be honored, not cleared — annotation was already the baseline.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, nextRefreshInterval)
+
+			var wsAfter tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfter))
+
+			require.Equal(t, int32(1), wsAfter.Status.Backoff.RetryCount)
+			require.NotNil(t, wsAfter.Status.Backoff.NextRetryTime)
+		})
+
+		t.Run("clears backoff for legacy object with empty observed metadata hash", func(t *testing.T) {
+			// A reconcile on a legacy object (ObservedMetadataHash=="") could be triggered by a
+			// metadata-only user change. Without a baseline we cannot distinguish that from a
+			// scheduled retry, so backoff must always be cleared to avoid silently blocking the change.
+			ws := newWs("test-backoff-empty-observed-hash", modHost.ModuleSource("my-module"))
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 1
+			ws.Status.ObservedMetadataHash = "" // legacy object — hash field not yet initialized
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			_, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			var wsAfter tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfter))
+
+			require.Equal(t, int32(0), wsAfter.Status.Backoff.RetryCount)
+			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
+			require.NotEmpty(t, wsAfter.Status.ObservedMetadataHash)
+			require.Equal(t, workspaceMetadataHash(&wsAfter), wsAfter.Status.ObservedMetadataHash)
+		})
+
+		t.Run("after clearing backoff for a resource change, a later failure can set backoff again and it remains applied", func(t *testing.T) {
+			ws := newWs("test-backoff-reapplies-after-failure", modHost.ModuleSource("my-module"))
+
+			// Simulate a user metadata-only update
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 1
+
+			if ws.Annotations == nil {
+				ws.Annotations = map[string]string{}
+			}
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+			ws.Annotations["example.com/trigger-reconcile"] = "new-value"
+
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			require.NotEqual(t, ws.Status.ObservedMetadataHash, workspaceMetadataHash(ws))
+
+			// Force the first reconcile to stop after clearing backoff
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			// First reconcile: should clear backoff because metadata changed
+			_, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			var wsAfterFirst tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfterFirst))
+
+			require.Equal(t, int32(0), wsAfterFirst.Status.Backoff.RetryCount)
+			require.Nil(t, wsAfterFirst.Status.Backoff.NextRetryTime)
+
+			// clearBackoff updates ObservedMetadataHash but leaves ObservedGeneration unchanged.
+			require.Equal(t, ws.Status.ObservedGeneration, wsAfterFirst.Status.ObservedGeneration)
+			require.Equal(t, workspaceMetadataHash(&wsAfterFirst), wsAfterFirst.Status.ObservedMetadataHash)
+
+			// Simulate a later failure in the same current resource state by setting backoff again
+			r.backoff(t.Context(), &wsAfterFirst, wsAfterFirst.Generation, workspaceMetadataHash(&wsAfterFirst))
+
+			var wsAfterBackoff tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfterBackoff))
+
+			require.Equal(t, int32(1), wsAfterBackoff.Status.Backoff.RetryCount)
+			require.NotNil(t, wsAfterBackoff.Status.Backoff.NextRetryTime)
+
+			// Second reconcile: because observed state was advanced when backoff was cleared,
+			// the same unchanged resource should now honor backoff instead of clearing it again.
+			res, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+			// backoff() with RetryCount=0 produces a 30s window — assert it's the backoff
+			// path and not the 30-min freshness path.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, time.Minute)
+
+			var wsAfterSecond tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfterSecond))
+
+			require.Equal(t, int32(1), wsAfterSecond.Status.Backoff.RetryCount)
+			require.NotNil(t, wsAfterSecond.Status.Backoff.NextRetryTime)
+		})
+
+		t.Run("legacy object with generation mismatch and empty observed state clears backoff", func(t *testing.T) {
+			// Simulates: generation-1 attempt failed (backoff set, ObservedGeneration=0),
+			// user then edited spec to generation 2 — backoff must be cleared even though
+			// ObservedGeneration is 0, not a prior non-zero value.
+			ws := newWs("test-backoff-empty-observed-state-second-pass", modHost.ModuleSource("my-module"))
+			ws.Generation = 2
+			ws.Status.ObservedGeneration = 0
+			ws.Status.ObservedMetadataHash = ""
+			ws.Status.Backoff.RetryCount = 3
+			ws.Status.Backoff.NextRetryTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			_, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+
+			var wsAfter tfv1alphav1.Workspace
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{
+				Namespace: ws.Namespace,
+				Name:      ws.Name,
+			}, &wsAfter))
+
+			require.Equal(t, int32(0), wsAfter.Status.Backoff.RetryCount)
+			require.Nil(t, wsAfter.Status.Backoff.NextRetryTime)
+		})
+	})
+
+	t.Run("freshness guard", func(t *testing.T) {
+		makeFreshWs := func(name string) (*tfv1alphav1.Workspace, *coordinationv1.Lease) {
+			ws := newWs(name, modHost.ModuleSource("my-module"))
+			ws.Generation = 1
+			ws.Status.ObservedGeneration = 1
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+			ws.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(30 * time.Minute))
+
+			now := metav1.NewMicroTime(time.Now())
+			otherLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      leaseName(ws),
+					Namespace: ws.Namespace,
+				},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("someone-else"),
+					LeaseDurationSeconds: ptr.To[int32](300),
+					AcquireTime:          &now,
+					RenewTime:            &now,
+				},
+			}
+			return ws, otherLease
+		}
+
+		t.Run("deletion bypasses freshness guard", func(t *testing.T) {
+			ws, otherLease := makeFreshWs("test-freshness-deletion")
+			deletionTime := metav1.Now()
+			ws.DeletionTimestamp = &deletionTime
+			ws.Finalizers = []string{"test-finalizer"} // required for DeletionTimestamp to persist
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			res, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+			// Freshness guard bypassed: requeue is from lease contention, not the 30-min refresh.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, nextRefreshInterval)
+		})
+
+		t.Run("manual destroy annotation bypasses freshness guard", func(t *testing.T) {
+			ws, otherLease := makeFreshWs("test-freshness-manual-destroy")
+			if ws.Annotations == nil {
+				ws.Annotations = map[string]string{}
+			}
+			ws.Annotations[tfv1alphav1.ManualDestroyAnnotation] = "true"
+			ws.Status.ObservedMetadataHash = workspaceMetadataHash(ws)
+
+			c := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(ws).
+				WithObjects(ws, otherLease).
+				Build()
+
+			r := &WorkspaceReconciler{
+				Client:   c,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(32),
+				leases:   &sync.Map{},
+				Tf:       runner.New(t.TempDir()),
+				Renderer: render.NewFileRender(t.TempDir()),
+			}
+
+			res, err := r.Reconcile(t.Context(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: ws.Namespace, Name: ws.Name},
+			})
+			require.NoError(t, err)
+			// Freshness guard bypassed: requeue is from lease contention, not the 30-min refresh.
+			require.Greater(t, res.RequeueAfter, time.Duration(0))
+			require.Less(t, res.RequeueAfter, nextRefreshInterval)
+		})
 	})
 }

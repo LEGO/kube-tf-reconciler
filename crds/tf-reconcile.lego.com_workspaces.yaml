@@ -356,6 +356,10 @@ spec:
                   workspace
                 format: int64
                 type: integer
+              observedMetadataHash:
+                description: ObservedMetadataHash is a fingerprint of labels+annotations
+                  (excluding ignored annotations)
+                type: string
               terraformMessage:
                 description: TerraformMessage provides details about the current terraform
                   operation
