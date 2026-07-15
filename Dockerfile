@@ -1,7 +1,6 @@
-FROM golang:1.25-alpine AS build
+FROM golang:1.26.4-alpine3.24 AS build
 
-RUN apk update && apk upgrade && apk add --no-cache ca-certificates
-RUN update-ca-certificates
+RUN apk add --no-cache ca-certificates && update-ca-certificates
 
 ARG SHA
 ARG DATE
