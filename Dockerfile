@@ -10,7 +10,7 @@ WORKDIR /src
 
 RUN CGO_ENABLED=0 go build -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
 
-FROM alpine:3.19 AS krec
+FROM alpine:3.24 AS krec
 
 RUN apk add --no-cache ca-certificates git openssh-client
 
