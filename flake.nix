@@ -25,9 +25,9 @@
         subPackages = ["."];
 
         # How to get the vendorHash:
-        # Option 1: set to lib.fakeHash and paste the value at build time
+        # Option 1: set to pkgs.lib.fakeHash and paste the value at build time
         # Option 2: go mod vendor && nix hash path --sri ./vendor
-        vendorHash = "sha256-7oXuw88kHgTvs2MEu5tmNMUK1DbbK0YyYK62EBjAaIw=";
+        vendorHash = "sha256-1/J3IRNa0hP6PQVE6++rHSTt6cz36eGVFpUSNG6pIIo=";
 
         env.CGO_ENABLED = "0";
 
