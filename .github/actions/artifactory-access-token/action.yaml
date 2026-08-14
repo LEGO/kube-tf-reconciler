@@ -1,0 +1,65 @@
+name: 'Artifactory Access Token'
+description: 'Acquire a short-lived Artifactory access token via GitHub OIDC token exchange'
+inputs:
+  artifactory_url:
+    description: "Artifactory URL"
+    required: false
+    default: "https://artifactory.novus.legogroup.io"
+  audience:
+    description: "OIDC Audience. Prefer a consumer-specific value over a shared default."
+    required: false
+    default: "lego-github"
+  provider:
+    description: "OIDC Provider name, usually the customer identifier"
+    required: true
+  repository:
+    description: "Repository name"
+    required: true
+
+outputs:
+  token:
+    description: "newly acquired access token"
+    value: ${{ steps.access-token.outputs.token }}
+  username:
+    description: "username for matching the token"
+    value: ${{ inputs.provider }}/${{ github.actor }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Get Access Token
+      shell: bash
+      id: access-token
+      run: |
+        set -euo pipefail
+
+        # Request the GitHub OIDC ID token for the configured audience.
+        ID_TOKEN=$(curl -sfLS -H "User-Agent: actions/oidc-client" \
+          -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${INPUTS_AUDIENCE}" | jq -r .value)
+
+        if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
+          echo "::error::Failed to acquire GitHub OIDC ID token. Ensure the job grants 'id-token: write'." >&2
+          exit 1
+        fi
+
+        # Exchange the ID token for an Artifactory access token.
+        REQ=$(curl -sfLS -XPOST "${INPUTS_ARTIFACTORY_URL}/access/api/v1/oidc/token" \
+          -H "Content-type: application/json" \
+          -d "{\"grant_type\": \"urn:ietf:params:oauth:grant-type:token-exchange\", \"subject_token_type\":\"urn:ietf:params:oauth:token-type:id_token\", \"subject_token\": \"$ID_TOKEN\", \"provider_name\": \"${INPUTS_PROVIDER}\"}")
+
+        ACCESS_TOKEN=$(echo "$REQ" | jq -r .access_token)
+
+        if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+          # Do NOT print $REQ — the response body can contain sensitive material.
+          echo "::error::Token exchange with Artifactory failed. Check the provider claim mapping and audience." >&2
+          exit 1
+        fi
+
+        # Mask the token so it is redacted from all logs, then export it.
+        echo "::add-mask::$ACCESS_TOKEN"
+        echo "token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+      env:
+        INPUTS_AUDIENCE: ${{ inputs.audience }}
+        INPUTS_ARTIFACTORY_URL: ${{ inputs.artifactory_url }}
+        INPUTS_PROVIDER: ${{ inputs.provider }}

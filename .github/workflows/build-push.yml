@@ -41,11 +41,10 @@ jobs:
       - name: Setup Docker Buildx 🛠️
         uses: docker/setup-buildx-action@v3
       - name: Get Access Token
-        uses: LEGO/artifactory/.github/actions/artifactory-access-token@v3
+        uses: ./.github/actions/artifactory-access-token
         id: access-token
         with:
-          provider: novus-api
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          provider: kube-tf-reconciler
           repository: ${{ github.event.repository.name }}
 
       - name: Login to JFrog 🐸
