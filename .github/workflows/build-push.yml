@@ -51,7 +51,7 @@ jobs:
       - uses: jfrog/setup-jfrog-cli@deda456d982fc5e9a7a020b63eb0d2968aedd33e # v5.1.0
         id: jfrog-cli
         env:
-          JF_URL: artifactory.novus.legogroup.io
+          JF_URL: https://artifactory.novus.legogroup.io
         with:
           oidc-provider-name: kube-tf-reconciler
 
