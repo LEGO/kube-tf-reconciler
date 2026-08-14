@@ -1,4 +1,4 @@
-FROM artifactory.novus.legogroup.io/cgr/go:1.26@sha256:f2fd006bcf534fb35df5c2f7595f0dda395a2c7a7daa99d986f045d52e563d35 AS build
+FROM artifactory.novus.legogroup.io/cgr/go:1.26.4@sha256:f2fd006bcf534fb35df5c2f7595f0dda395a2c7a7daa99d986f045d52e563d35 AS build
 
 ARG SHA
 ARG DATE
