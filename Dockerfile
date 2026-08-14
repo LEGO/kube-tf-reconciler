@@ -8,7 +8,7 @@ WORKDIR /src
 
 RUN CGO_ENABLED=0 go build -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
 
-FROM artifactory.novus.legogroup.io/cgr/chainguard-base:v20230214@sha256:4c0a58ebbfacbd8c8248d2d2098d5219e4f1c64237c0ed5147759fe9c0206432 AS krec
+FROM artifactory.novus.legogroup.io/cgr/chainguard-base:latest@sha256:4187092f534afa184684e41fe5554e6c4c93c1d183b7000ab0e0db71a9371957 AS krec
 
 RUN apk add --no-cache git openssh-client
 
