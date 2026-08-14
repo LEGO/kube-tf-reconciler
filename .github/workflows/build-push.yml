@@ -41,13 +41,7 @@ jobs:
   
       - name: Setup Docker Buildx 🛠️
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-#      - name: Get Access Token
-#        uses: ./.github/actions/artifactory-access-token
-#        id: access-token
-#        with:
-#          provider: kube-tf-reconciler
-#          repository: ${{ github.event.repository.name }}
-#
+
       - uses: jfrog/setup-jfrog-cli@deda456d982fc5e9a7a020b63eb0d2968aedd33e # v5.1.0
         id: jfrog-cli
         env:
