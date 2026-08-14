@@ -12,9 +12,6 @@ inputs:
   provider:
     description: "OIDC Provider name, usually the customer identifier"
     required: true
-  repository:
-    description: "Repository name"
-    required: true
 
 outputs:
   token:
