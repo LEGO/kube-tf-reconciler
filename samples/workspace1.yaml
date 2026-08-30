@@ -3,7 +3,7 @@ kind: Workspace
 metadata:
   name: workspace1
 spec:
-  terraformVersion: 1.11.2
+  toolVersion: 1.11.2
   tf:
     env:
       - name: AWS_REGION

@@ -72,6 +72,8 @@ type WorkspaceSummary struct {
 type WorkspaceDetail struct {
 	WorkspaceSummary
 	TerraformVersion       string       `json:"terraformVersion"`
+	Tool                   string       `json:"tool,omitempty"`
+	ToolVersion            string       `json:"toolVersion,omitempty"`
 	AutoApply              bool         `json:"autoApply"`
 	Destroy                string       `json:"destroy"`
 	LastPlanOutput         string       `json:"lastPlanOutput"`
@@ -219,6 +221,8 @@ func fetchWorkspaceDetail(ctx context.Context, k8sClient client.Client, namespac
 			Deleting:             !ws.DeletionTimestamp.IsZero(),
 		},
 		TerraformVersion:  ws.Spec.TerraformVersion,
+		Tool:              string(ws.Spec.Tool),
+		ToolVersion:       ws.Spec.ToolVersion,
 		AutoApply:         ws.Spec.AutoApply,
 		Destroy:           string(ws.Spec.Destroy),
 		LastPlanOutput:    ws.Status.LastPlanOutput,

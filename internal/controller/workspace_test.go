@@ -517,7 +517,7 @@ func newWs(name, moduleSource string) *tfv1alphav1.Workspace {
 			},
 			AutoApply:        true,
 			PreventDestroy:   true,
-			TerraformVersion: "1.13.3",
+			ToolVersion:      "1.13.3",
 			ProviderSpecs: []tfv1alphav1.ProviderSpec{
 				{
 					Name:    "aws",

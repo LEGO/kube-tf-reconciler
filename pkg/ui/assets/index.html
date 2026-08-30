@@ -274,8 +274,8 @@
           <dt class="text-gray-400 self-center">Next Refresh</dt>
           <dd class="text-gray-400" x-text="detail && formatNextRefresh(detail.nextRefreshTimestamp)"></dd>
 
-          <dt class="text-gray-400 self-center">Terraform Version</dt>
-          <dd class="font-mono text-gray-200" x-text="detail && detail.terraformVersion || '-'"></dd>
+          <dt class="text-gray-400 self-center">Tool Version</dt>
+          <dd class="font-mono text-gray-200" x-text="detail && (detail.toolVersion || detail.terraformVersion) || '-'"></dd>
 
           <dt class="text-gray-400 self-center">Auto Apply</dt>
           <dd>

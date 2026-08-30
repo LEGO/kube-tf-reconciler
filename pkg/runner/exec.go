@@ -18,6 +18,8 @@ import (
 	"github.com/hashicorp/hc-install/product"
 	"github.com/hashicorp/hc-install/releases"
 	"github.com/hashicorp/terraform-exec/tfexec"
+	tofuexec "github.com/opentofu/tofu-exec/tfexec"
+	"github.com/opentofu/tofudl"
 )
 
 type Exec struct {
@@ -26,8 +28,8 @@ type Exec struct {
 	WorkspacesDir  string
 	PluginCacheDir string
 
-	terraformInstalledVersions map[string]string
-	terraformInstallMutex      sync.RWMutex
+	installedVersions map[string]string
+	installMutex      sync.RWMutex
 	providerInitMutex          sync.Mutex
 
 	outputStreamReader    io.ReadCloser
@@ -68,7 +70,7 @@ func New(rootDir string) *Exec {
 		installDir:                 installDir,
 		WorkspacesDir:              workspacesDir,
 		PluginCacheDir:             pluginCacheDir,
-		terraformInstalledVersions: make(map[string]string),
+		installedVersions: make(map[string]string),
 	}
 }
 
@@ -101,12 +103,12 @@ func (e *Exec) SetupTerraformRC(workspacePath string, terraformRCContent string)
 	return terraformRCPath, nil
 }
 
-func (e *Exec) TerraformInit(ctx context.Context, tf *tfexec.Terraform, cb func(stdout, stderr string), opts ...tfexec.InitOption) error {
+func (e *Exec) TerraformInit(ctx context.Context, tool IaCTool, cb func(stdout, stderr string), opts ...InitOption) error {
 	e.providerInitMutex.Lock()
 	defer e.providerInitMutex.Unlock()
 	var err error
-	WithOutputStream(ctx, tf, func() {
-		err = tf.Init(ctx, opts...)
+	WithOutputStream(ctx, tool, func() {
+		err = tool.Init(ctx, opts...)
 	}, func(stdout, stderr string) {
 		cb(stdout, stderr)
 	})
@@ -114,29 +116,44 @@ func (e *Exec) TerraformInit(ctx context.Context, tf *tfexec.Terraform, cb func(
 	return err
 }
 
+func (e *Exec) getBinary(ctx context.Context, tool tfreconcilev1alpha1.Tool, iacVersion string) (string, error) {
+	if tool == "" || tool == tfreconcilev1alpha1.ToolTerraform {
+		return e.getTerraformBinary(ctx, iacVersion)
+	}
+	if tool == tfreconcilev1alpha1.ToolOpenTofu {
+		return e.getTofuBinary(ctx, iacVersion)
+	}
+	return "", fmt.Errorf("unsupported IaC tool %q", tool)
+}
+
 func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) (string, error) {
-	e.terraformInstallMutex.Lock()
-	defer e.terraformInstallMutex.Unlock()
-	if execPath, exists := e.terraformInstalledVersions[terraformVersion]; exists {
+	e.installMutex.Lock()
+	defer e.installMutex.Unlock()
+	cacheKey := fmt.Sprintf("terraform@%s", terraformVersion)
+	if execPath, exists := e.installedVersions[cacheKey]; exists {
 		// Verify the binary still exists
 		if _, err := os.Stat(execPath); err == nil {
 			return execPath, nil
 		}
 		// If it doesn't exist or was deleted, remove from cache
-		delete(e.terraformInstalledVersions, terraformVersion)
+		delete(e.installedVersions, cacheKey)
 	}
 
-	installDir := filepath.Join(e.installDir, terraformVersion)
+	installDir := filepath.Join(e.installDir, "terraform", terraformVersion)
 	err := os.MkdirAll(installDir, 0755)
 	if err != nil {
 		return "", fmt.Errorf("failed to create install dir: %w", err)
 	}
 
 	// Not installed or missing — do the install
+	tfVersion, err := version.NewVersion(terraformVersion)
+	if err != nil {
+		return "", fmt.Errorf("invalid terraform version %q: %w", terraformVersion, err)
+	}
 	installer := &releases.ExactVersion{
 		Product:    product.Terraform,
 		InstallDir: installDir,
-		Version:    version.Must(version.NewVersion(terraformVersion)),
+		Version:    tfVersion,
 	}
 	installer.Timeout = 2 * time.Minute
 
@@ -145,11 +162,50 @@ func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) 
 		return "", fmt.Errorf("failed to install terraform: %w", err)
 	}
 
-	e.terraformInstalledVersions[terraformVersion] = execPath
+	e.installedVersions[cacheKey] = execPath
 	return execPath, nil
 }
 
-func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (*tfexec.Terraform, string, error) {
+func (e *Exec) getTofuBinary(ctx context.Context, tofuVersion string) (string, error) {
+	tofuVersion = strings.TrimPrefix(tofuVersion, "v")
+	e.installMutex.Lock()
+	defer e.installMutex.Unlock()
+	cacheKey := fmt.Sprintf("opentofu@%s", tofuVersion)
+	if execPath, exists := e.installedVersions[cacheKey]; exists {
+		// Verify the binary still exists
+		if _, err := os.Stat(execPath); err == nil {
+			return execPath, nil
+		}
+		// If it doesn't exist or was deleted, remove from cache
+		delete(e.installedVersions, cacheKey)
+	}
+
+	installDir := filepath.Join(e.installDir, "opentofu", tofuVersion)
+	err := os.MkdirAll(installDir, 0755)
+	if err != nil {
+		return "", fmt.Errorf("failed to create install dir: %w", err)
+	}
+	execPath := filepath.Join(installDir, "tofu")
+
+	downloader, err := tofudl.New()
+	if err != nil {
+		return "", fmt.Errorf("failed to create tofu downloader: %w", err)
+	}
+	binary, err := downloader.Download(ctx, tofudl.DownloadOptVersion(tofudl.Version(tofuVersion)))
+	if err != nil {
+		return "", fmt.Errorf("failed to download tofu: %w", err)
+	}
+
+	err = os.WriteFile(execPath, binary, 0755)
+	if err != nil {
+		return "", fmt.Errorf("failed to write tofu binary: %w", err)
+	}
+
+	e.installedVersions[cacheKey] = execPath
+	return execPath, nil
+}
+
+func (e *Exec) GetIaCToolForWorkspace(ctx context.Context, ws *tfreconcilev1alpha1.Workspace) (IaCTool, string, error) {
 	path := e.GetWorkspacePath(ws)
 
 	var err error
@@ -161,17 +217,41 @@ func (e *Exec) GetTerraformForWorkspace(ctx context.Context, ws *tfreconcilev1al
 		}
 	}
 
-	execPath, err := e.getTerraformBinary(ctx, ws.Spec.TerraformVersion)
+	tool := ws.Spec.Tool
+	if tool == "" {
+		tool = tfreconcilev1alpha1.ToolTerraform
+	}
+
+	iacVersion := ws.Spec.ToolVersion
+	if iacVersion == "" && tool == tfreconcilev1alpha1.ToolTerraform {
+		// backwards compatibility for the deprecated terraformVersion field
+		iacVersion = ws.Spec.TerraformVersion
+	}
+	if iacVersion == "" {
+		return nil, "", fmt.Errorf("toolVersion is required when tool is %s", tool)
+	}
+
+	execPath, err := e.getBinary(ctx, tool, iacVersion)
 	if err != nil {
 		return nil, "", err
 	}
 
-	tf, err := tfexec.NewTerraform(path, execPath)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to create terraform instance: %w", err)
+	switch tool {
+	case tfreconcilev1alpha1.ToolTerraform:
+		tf, err := tfexec.NewTerraform(path, execPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to create terraform instance: %w", err)
+		}
+		return NewTerraformTool(tf), terraformRCPath, nil
+	case tfreconcilev1alpha1.ToolOpenTofu:
+		tofu, err := tofuexec.NewTofu(path, execPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to create tofu instance: %w", err)
+		}
+		return NewTofuTool(tofu), terraformRCPath, nil
+	default:
+		return nil, "", fmt.Errorf("unsupported IaC tool %q", tool)
 	}
-
-	return tf, terraformRCPath, nil
 }
 
 func (e *Exec) CleanupWorkspace(ws *tfreconcilev1alpha1.Workspace) error {
@@ -227,15 +307,15 @@ func (e *Exec) CalculateChecksum(ws *tfreconcilev1alpha1.Workspace) (string, err
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func WithOutputStream(ctx context.Context, tf *tfexec.Terraform, action func(), cb func(stdout, stderr string)) {
+func WithOutputStream(ctx context.Context, tool IaCTool, action func(), cb func(stdout, stderr string)) {
 	outBody := strings.Builder{}
 	errBody := strings.Builder{}
 	cbMu := sync.Mutex{}
 	ro, wo := io.Pipe()
 	re, we := io.Pipe()
 
-	tf.SetStdout(wo)
-	tf.SetStderr(we)
+	tool.SetStdout(wo)
+	tool.SetStderr(we)
 
 	wg := sync.WaitGroup{}
 	wg.Add(3)
@@ -270,8 +350,8 @@ func WithOutputStream(ctx context.Context, tf *tfexec.Terraform, action func(), 
 	go func() {
 		defer wg.Done()
 		action()
-		tf.SetStderr(nil)
-		tf.SetStdout(nil)
+		tool.SetStderr(os.Stderr)
+		tool.SetStdout(os.Stdout)
 		_ = ro.Close()
 		_ = wo.Close()
 		_ = re.Close()
