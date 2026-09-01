@@ -7,6 +7,16 @@ import (
 
 type DestroyBehaviour string
 
+// Tool is the IaC tool used to plan and apply the workspace
+type Tool string
+
+const (
+	// ToolTerraform uses the terraform CLI
+	ToolTerraform Tool = "terraform"
+	// ToolOpenTofu uses the tofu CLI
+	ToolOpenTofu Tool = "opentofu"
+)
+
 // These are valid destroy behaviours. "DestroyBehaviourSkip" means nothing is
 // done when a Workspace is deleted. "DestroyBehaviourAuto" means that a
 // `terraform destroy` action is automatically invoked when the resource is
@@ -159,8 +169,19 @@ type AuthenticationSpec struct {
 // WorkspaceSpec defines the desired state of Workspace.
 type WorkspaceSpec struct {
 	// TerraformVersion is the version of terraform to use
-	// +kubebuilder:validation:Required
-	TerraformVersion string `json:"terraformVersion"`
+	// Deprecated: use ToolVersion instead
+	// +kubebuilder:validation:Optional
+	TerraformVersion string `json:"terraformVersion,omitempty"`
+
+	// Tool is the IaC tool to use, either terraform or opentofu
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=terraform
+	// +kubebuilder:validation:Enum=terraform;opentofu
+	Tool Tool `json:"tool,omitempty"`
+
+	// ToolVersion is the version of the IaC tool to use
+	// +kubebuilder:validation:Optional
+	ToolVersion string `json:"toolVersion,omitempty"`
 
 	// Backend is the backend configuration for the workspace
 	// +kubebuilder:validation:Required
