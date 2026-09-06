@@ -36,6 +36,7 @@ spec:
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
+        command: ["krec"]
         args:
           - "ui"
           - "--in-cluster"
@@ -55,4 +56,19 @@ spec:
           httpGet:
             path: /api/config
             port: http
+        {{- if .Values.ui.auth.enabled }}
+        env:
+        - name: KREC_UI_OAUTH_ISSUER
+          value: {{ required "ui.auth.issuer is required" .Values.ui.auth.issuer | quote }}
+        - name: KREC_UI_OAUTH_CLIENT_ID
+          value: {{ required "ui.auth.clientID is required" .Values.ui.auth.clientID | quote }}
+        - name: KREC_UI_OAUTH_CLIENT_SECRET
+          value: {{ required "ui.auth.clientSecret is required" .Values.ui.auth.clientSecret | quote }}
+        - name: KREC_UI_OAUTH_REDIRECT_URL
+          value: {{ .Values.ui.auth.redirectURL | quote }}
+        - name: KREC_UI_OAUTH_SCOPES
+          value: {{ .Values.ui.auth.scopes | quote }}
+        - name: KREC_UI_SESSION_SECRET
+          value: {{ .Values.ui.auth.sessionSecret | quote }}
+        {{- end }}
 {{- end }}
