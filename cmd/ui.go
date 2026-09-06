@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -16,6 +17,7 @@ import (
 var uiNamespace string
 var uiPort int
 var uiContext string
+var uiInCluster bool
 
 //nolint:exhaustruct,gochecknoglobals
 var uiCmd = &cobra.Command{
@@ -29,6 +31,7 @@ func init() {
 	uiCmd.Flags().StringVarP(&uiNamespace, "namespace", "n", "", "Namespace to watch (empty = all namespaces)")
 	uiCmd.Flags().IntVarP(&uiPort, "port", "p", 7777, "Port to listen on")
 	uiCmd.Flags().StringVarP(&uiContext, "context", "c", "", "Kubeconfig context to use (default: current context)")
+	uiCmd.Flags().BoolVar(&uiInCluster, "in-cluster", false, "Run in-cluster using the pod service account instead of kubeconfig")
 }
 
 func runUI(cmd *cobra.Command, _ []string) error {
@@ -36,19 +39,30 @@ func runUI(cmd *cobra.Command, _ []string) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(uiScheme))
 	utilruntime.Must(tfreconcilev1alpha1.AddToScheme(uiScheme))
 
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	overrides := &clientcmd.ConfigOverrides{}
-	if uiContext != "" {
-		overrides.CurrentContext = uiContext
-	}
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load kubeconfig: %w", err)
+	var (
+		cfg *rest.Config
+		err error
+	)
+	if uiInCluster {
+		cfg, err = rest.InClusterConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load in-cluster config: %w", err)
+		}
+	} else {
+		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+		overrides := &clientcmd.ConfigOverrides{}
+		if uiContext != "" {
+			overrides.CurrentContext = uiContext
+		}
+		cfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load kubeconfig: %w", err)
+		}
 	}
 	k8sClient, err := client.New(cfg, client.Options{Scheme: uiScheme})
 	if err != nil {
 		return fmt.Errorf("failed to create k8s client: %w", err)
 	}
 
-	return ui.Run(cmd.Context(), k8sClient, uiNamespace, uiContext, uiPort)
+	return ui.Run(cmd.Context(), k8sClient, uiNamespace, uiContext, uiPort, uiInCluster)
 }

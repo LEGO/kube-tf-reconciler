@@ -1,0 +1,58 @@
+{{- if .Values.ui.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/version: {{ .Values.image.tag }}
+    app.kubernetes.io/name: {{ .Values.appName }}-ui
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/part-of: {{ .Values.appName }}
+  name: {{ .Values.appName }}-ui
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.appName }}-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/version: {{ .Values.image.tag }}
+        app.kubernetes.io/name: {{ .Values.appName }}-ui
+        app.kubernetes.io/component: dashboard
+        app.kubernetes.io/part-of: {{ .Values.appName }}
+        app: {{ .Values.appName }}-ui
+    spec:
+      serviceAccountName: {{ .Values.appName }}-ui
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: {{ .Values.appName }}-ui
+        image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+        args:
+          - "ui"
+          - "--in-cluster"
+          - "--port"
+          - "8080"
+          - "--namespace"
+          - {{ .Values.ui.namespace | quote }}
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /api/config
+            port: http
+        livenessProbe:
+          httpGet:
+            path: /api/config
+            port: http
+{{- end }}

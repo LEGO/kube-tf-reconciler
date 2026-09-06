@@ -16,6 +16,20 @@ serviceMonitor:
   enabled: true
   labels: {}
 
+# In-cluster web dashboard
+ui:
+  enabled: false
+  replicas: 1
+  # Namespace to show by default (empty = all namespaces)
+  namespace: ""
+  service:
+    port: 80
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+
 # Environment variables for the reconciler container
 env:
   KREC_NAMESPACE: "terraform-reconciler"

@@ -18,7 +18,7 @@
     <span class="font-bold tracking-tight text-white shrink-0">kube-tf-reconciler</span>
 
     <!-- Context selector -->
-    <div class="flex items-center gap-2 text-sm">
+    <div class="flex items-center gap-2 text-sm" x-show="!inCluster">
       <label class="text-gray-500 shrink-0">Context</label>
       <select
         x-model="selectedContext"
@@ -522,12 +522,26 @@
         namespaces: [],
         selectedContext: '',
         selectedNamespace: '',
+        inCluster: false,
 
         init() {
-          this.fetchContexts();
+          this.fetchConfig();
           this.fetchNamespaces();
           this.fetchWorkspaceList();
           this.connectSSE();
+        },
+
+        fetchConfig() {
+          fetch('/api/config')
+            .then(r => r.json())
+            .then(data => {
+              this.inCluster = !!data.inCluster;
+              this.selectedNamespace = data.namespace || '';
+              if (!this.inCluster) {
+                this.fetchContexts();
+              }
+            })
+            .catch(() => {});
         },
 
         fetchContexts() {
