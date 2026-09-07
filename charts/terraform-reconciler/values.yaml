@@ -16,6 +16,34 @@ serviceMonitor:
   enabled: true
   labels: {}
 
+# In-cluster web dashboard
+ui:
+  enabled: false
+  replicas: 1
+  # Namespace to show by default (empty = all namespaces)
+  namespace: ""
+  service:
+    port: 80
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+  # OAuth2/OIDC authentication (all three of issuer, clientID and
+  # clientSecret must be set to enable authentication)
+  auth:
+    enabled: false
+    issuer: ""
+    clientID: ""
+    clientSecret: ""
+    # Full callback URL registered at the provider. When empty it is
+    # derived from the request Host and X-Forwarded-Proto header.
+    redirectURL: ""
+    scopes: "openid profile email"
+    # Secret used to sign session cookies. When empty an ephemeral secret
+    # is generated at startup (sessions reset on every pod restart).
+    sessionSecret: ""
+
 # Environment variables for the reconciler container
 env:
   KREC_NAMESPACE: "terraform-reconciler"

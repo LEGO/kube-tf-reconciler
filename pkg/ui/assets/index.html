@@ -18,7 +18,7 @@
     <span class="font-bold tracking-tight text-white shrink-0">kube-tf-reconciler</span>
 
     <!-- Context selector -->
-    <div class="flex items-center gap-2 text-sm">
+    <div class="flex items-center gap-2 text-sm" x-show="!inCluster">
       <label class="text-gray-500 shrink-0">Context</label>
       <select
         x-model="selectedContext"
@@ -46,7 +46,12 @@
       </select>
     </div>
 
-    <div class="ml-auto flex items-center gap-2 text-sm">
+    <div class="ml-auto flex items-center gap-3 text-sm">
+      <button
+        x-show="authEnabled"
+        @click="window.location.href = '/oauth2/logout'"
+        class="text-gray-400 hover:text-white transition-colors"
+      >Sign out</button>
       <span class="relative flex h-2 w-2">
         <span
           class="absolute inline-flex h-full w-full rounded-full opacity-75"
@@ -522,12 +527,28 @@
         namespaces: [],
         selectedContext: '',
         selectedNamespace: '',
+        inCluster: false,
+        authEnabled: false,
 
         init() {
-          this.fetchContexts();
+          this.fetchConfig();
           this.fetchNamespaces();
           this.fetchWorkspaceList();
           this.connectSSE();
+        },
+
+        fetchConfig() {
+          fetch('/api/config')
+            .then(r => r.json())
+            .then(data => {
+              this.inCluster = !!data.inCluster;
+              this.authEnabled = !!data.authEnabled;
+              this.selectedNamespace = data.namespace || '';
+              if (!this.inCluster) {
+                this.fetchContexts();
+              }
+            })
+            .catch(() => {});
         },
 
         fetchContexts() {
@@ -542,12 +563,22 @@
 
         fetchNamespaces() {
           fetch('/api/namespaces')
-            .then(r => r.json())
+            .then(r => this.requireAuth(r))
+            .then(r => r ? r.json() : null)
             .then(data => {
+              if (!data) return;
               this.namespaces = data.namespaces || [];
               this.selectedNamespace = data.current || '';
             })
             .catch(() => {});
+        },
+
+        requireAuth(response) {
+          if (response.status === 401) {
+            window.location.href = '/oauth2/login';
+            return null;
+          }
+          return response;
         },
 
         onContextChange() {
@@ -601,8 +632,10 @@
 
         fetchWorkspaceList() {
           fetch('/api/workspaces')
-            .then(r => r.json())
+            .then(r => this.requireAuth(r))
+            .then(r => r ? r.json() : null)
             .then(data => {
+              if (!data) return;
               this.workspaces = data;
               this.loading = false;
             })
@@ -613,8 +646,10 @@
 
         fetchDetail(namespace, name) {
           fetch(`/api/workspaces/${namespace}/${name}`)
-            .then(r => r.json())
+            .then(r => this.requireAuth(r))
+            .then(r => r ? r.json() : null)
             .then(data => {
+              if (!data) return;
               this.detail = data;
             })
             .catch(() => {});
@@ -643,7 +678,9 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ annotation, value }),
           })
+            .then(r => this.requireAuth(r))
             .then(r => {
+              if (!r) return;
               if (!r.ok) return r.text().then(t => { throw new Error(t); });
               this.fetchDetail(namespace, name);
             })
@@ -654,8 +691,13 @@
           if (this.plans.length > 0 || this.plansLoading || !this.selectedWorkspace) return;
           this.plansLoading = true;
           fetch(`/api/workspaces/${this.selectedWorkspace.namespace}/${this.selectedWorkspace.name}/plans`)
-            .then(r => r.json())
-            .then(data => { this.plans = data; this.plansLoading = false; })
+            .then(r => this.requireAuth(r))
+            .then(r => r ? r.json() : null)
+            .then(data => {
+              if (!data) return;
+              this.plans = data;
+              this.plansLoading = false;
+            })
             .catch(() => { this.plansLoading = false; });
         },
 

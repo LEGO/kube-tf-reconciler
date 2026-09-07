@@ -43,8 +43,8 @@ func (s *state) set(k8sClient client.Client, namespace, context string) {
 	s.context = context
 }
 
-func Run(ctx context.Context, initialClient client.Client, namespace string, initialContext string, port int) error {
-	if initialContext == "" {
+func Run(ctx context.Context, initialClient client.Client, namespace string, initialContext string, port int, inCluster bool, authCfg *AuthConfig) error {
+	if !inCluster && initialContext == "" {
 		_, currentContext, err := listKubeContexts()
 		if err != nil {
 			slog.Error("failed to derive initial kube context", "error", err)
@@ -56,6 +56,18 @@ func Run(ctx context.Context, initialClient client.Client, namespace string, ini
 	st := &state{k8sClient: initialClient, namespace: namespace, context: initialContext}
 	b := newBroker()
 	mux := http.NewServeMux()
+
+	var handler http.Handler = mux
+	if authCfg != nil {
+		auth, err := newAuthenticator(ctx, *authCfg)
+		if err != nil {
+			return fmt.Errorf("initialising oauth authentication: %w", err)
+		}
+		mux.HandleFunc("GET /oauth2/login", auth.handleLogin)
+		mux.HandleFunc("GET /oauth2/callback", auth.handleCallback)
+		mux.HandleFunc("GET /oauth2/logout", auth.handleLogout)
+		handler = auth.middleware(mux)
+	}
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -72,7 +84,16 @@ func Run(ctx context.Context, initialClient client.Client, namespace string, ini
 		_, _ = w.Write(data)
 	})
 
+	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
+		_, activeNS, activeCtx := st.get()
+		writeJSON(w, map[string]any{"inCluster": inCluster, "authEnabled": authCfg != nil, "namespace": activeNS, "context": activeCtx})
+	})
+
 	mux.HandleFunc("GET /api/contexts", func(w http.ResponseWriter, r *http.Request) {
+		if inCluster {
+			writeJSON(w, map[string]any{"contexts": []string{}, "current": ""})
+			return
+		}
 		ctxList, current, err := listKubeContexts()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -108,14 +129,19 @@ func Run(ctx context.Context, initialClient client.Client, namespace string, ini
 			return
 		}
 
-		newClient, err := buildClientForContext(req.Context)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to build client for context %q: %s", req.Context, err), http.StatusBadRequest)
-			return
+		if !inCluster {
+			newClient, err := buildClientForContext(req.Context)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to build client for context %q: %s", req.Context, err), http.StatusBadRequest)
+				return
+			}
+			st.set(newClient, req.Namespace, req.Context)
+			slog.Info("switched context/namespace", "context", req.Context, "namespace", req.Namespace)
+		} else {
+			k8sClient, _, _ := st.get()
+			st.set(k8sClient, req.Namespace, "")
+			slog.Info("switched namespace", "namespace", req.Namespace)
 		}
-
-		st.set(newClient, req.Namespace, req.Context)
-		slog.Info("switched context/namespace", "context", req.Context, "namespace", req.Namespace)
 
 		// Immediately push a fresh workspace list to all SSE subscribers.
 		k8sClient, ns, _ := st.get()
@@ -191,8 +217,12 @@ func Run(ctx context.Context, initialClient client.Client, namespace string, ini
 
 	mux.HandleFunc("GET /api/events", b.ServeSSE)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := &http.Server{Addr: addr, Handler: mux}
+	host := "127.0.0.1"
+	if inCluster {
+		host = "0.0.0.0"
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+	srv := &http.Server{Addr: addr, Handler: handler}
 
 	go func() {
 		ticker := time.NewTicker(3 * time.Second)
@@ -219,10 +249,12 @@ func Run(ctx context.Context, initialClient client.Client, namespace string, ini
 
 	url := fmt.Sprintf("http://localhost:%d", port)
 	slog.Info("starting web UI", "url", url)
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		openBrowser(url)
-	}()
+	if !inCluster {
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			openBrowser(url)
+		}()
+	}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("http server: %w", err)
