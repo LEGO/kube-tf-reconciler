@@ -4,18 +4,32 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>kube-tf-reconciler</title>
+  <script>
+    tailwind.config = { darkMode: 'class' };
+
+    // Apply dark mode immediately to avoid flash
+    (function () {
+      try {
+        var saved = localStorage.getItem('darkMode');
+        var dark = saved !== null ? saved === 'true' : true;
+        if (dark) document.documentElement.classList.add('dark');
+      } catch (e) {
+        // localStorage can throw (e.g. blocked); default to light without breaking page
+      }
+    })();
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <style>
     [x-cloak] { display: none !important; }
   </style>
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen font-sans antialiased"
+<body class="bg-gray-100 dark:bg-gray-950 text-gray-900 dark:text-gray-100 min-h-screen font-sans antialiased"
       x-data="app()" x-cloak>
 
   <!-- Navbar -->
-  <nav class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center gap-4 sticky top-0 z-10">
-    <span class="font-bold tracking-tight text-white shrink-0">kube-tf-reconciler</span>
+  <nav class="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 px-6 py-3 flex items-center gap-4 sticky top-0 z-10">
+    <span class="font-bold tracking-tight text-gray-900 dark:text-white shrink-0">kube-tf-reconciler</span>
 
     <!-- Context selector -->
     <div class="flex items-center gap-2 text-sm">
@@ -23,7 +37,7 @@
       <select
         x-model="selectedContext"
         @change="onContextChange()"
-        class="bg-gray-800 border border-gray-700 text-gray-200 text-sm rounded px-2 py-1 focus:outline-none focus:border-indigo-500 min-w-[160px] max-w-[280px]"
+        class="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 text-gray-800 dark:text-gray-200 text-sm rounded px-2 py-1 focus:outline-none focus:border-indigo-500 min-w-[160px] max-w-[280px]"
       >
         <template x-for="ctx in contexts" :key="ctx">
           <option :value="ctx" x-text="ctx"></option>
@@ -37,7 +51,7 @@
       <select
         x-model="selectedNamespace"
         @change="onNamespaceChange()"
-        class="bg-gray-800 border border-gray-700 text-gray-200 text-sm rounded px-2 py-1 focus:outline-none focus:border-indigo-500 min-w-[140px] max-w-[240px]"
+        class="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 text-gray-800 dark:text-gray-200 text-sm rounded px-2 py-1 focus:outline-none focus:border-indigo-500 min-w-[140px] max-w-[240px]"
       >
         <option value="">all namespaces</option>
         <template x-for="ns in namespaces" :key="ns">
@@ -46,64 +60,85 @@
       </select>
     </div>
 
-    <div class="ml-auto flex items-center gap-2 text-sm">
+    <div class="ml-auto flex items-center gap-3 text-sm">
       <span class="relative flex h-2 w-2">
         <span
           class="absolute inline-flex h-full w-full rounded-full opacity-75"
-          :class="liveConnected ? 'animate-ping bg-green-400' : 'bg-gray-600'"
+          :class="liveConnected ? 'animate-ping bg-green-400' : 'bg-gray-400 dark:bg-gray-600'"
         ></span>
         <span
           class="relative inline-flex rounded-full h-2 w-2"
-          :class="liveConnected ? 'bg-green-400' : 'bg-gray-600'"
+          :class="liveConnected ? 'bg-green-400' : 'bg-gray-400 dark:bg-gray-600'"
         ></span>
       </span>
-      <span :class="liveConnected ? 'text-green-400' : 'text-gray-500'">
+      <span :class="liveConnected ? 'text-green-500 dark:text-green-400' : 'text-gray-400 dark:text-gray-500'">
         <span x-text="liveConnected ? 'live' : 'reconnecting...'"></span>
       </span>
+
+      <!-- Dark mode toggle -->
+      <button
+        type="button"
+        @click="toggleDarkMode()"
+        class="p-1.5 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+        :title="darkMode ? 'Switch to light mode' : 'Switch to dark mode'"
+        :aria-label="darkMode ? 'Switch to light mode' : 'Switch to dark mode'"
+        :aria-pressed="darkMode"
+      >
+        <!-- Sun icon (shown in dark mode) -->
+        <svg x-show="darkMode" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707M17.657 17.657l-.707-.707M6.343 6.343l-.707-.707M12 8a4 4 0 100 8 4 4 0 000-8z"/>
+        </svg>
+        <!-- Moon icon (shown in light mode) -->
+        <svg x-show="!darkMode" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+        </svg>
+      </button>
     </div>
   </nav>
 
   <!-- Breadcrumbs -->
-  <nav class="px-6 py-2 border-b border-gray-800 flex items-center gap-1.5 text-sm text-gray-400">
+  <nav class="px-6 py-2 border-b border-gray-200 dark:border-gray-800 flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400">
     <button
       @click="goBack()"
-      class="hover:text-white transition-colors"
-      :class="selectedWorkspace ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-200 cursor-default pointer-events-none'"
+      class="hover:text-gray-900 dark:hover:text-white transition-colors"
+      :class="selectedWorkspace ? 'text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 dark:hover:text-indigo-300' : 'text-gray-700 dark:text-gray-200 cursor-default pointer-events-none'"
     >Workspaces</button>
     <template x-if="selectedWorkspace">
       <span class="flex items-center gap-1.5">
-        <svg class="w-3 h-3 text-gray-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-        </svg>
-        <button
-          @click="selectedPlan = null"
-          class="font-mono transition-colors"
-          :class="selectedPlan ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-200 cursor-default pointer-events-none'"
+          <svg class="w-3 h-3 text-gray-400 dark:text-gray-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+          </svg>
+          <button
+            @click="selectedPlan = null"
+            class="font-mono transition-colors"
+            :class="selectedPlan ? 'text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 dark:hover:text-indigo-300' : 'text-gray-700 dark:text-gray-200 cursor-default pointer-events-none'"
           x-text="selectedWorkspace.namespace + '/' + selectedWorkspace.name"
         ></button>
       </span>
     </template>
     <template x-if="selectedWorkspace && selectedPlan">
       <span class="flex items-center gap-1.5">
-        <svg class="w-3 h-3 text-gray-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-        </svg>
-        <span class="font-mono text-gray-200" x-text="selectedPlan.name"></span>
+          <svg class="w-3 h-3 text-gray-400 dark:text-gray-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+          </svg>
+          <span class="font-mono text-gray-700 dark:text-gray-200" x-text="selectedPlan.name"></span>
       </span>
     </template>
   </nav>
 
   <!-- List View -->
   <div x-show="!selectedWorkspace" class="w-full">
-    <div x-show="loading" class="p-8 text-gray-500">Loading workspaces...</div>
+    <div x-show="loading" class="p-8 text-gray-400 dark:text-gray-500">Loading workspaces...</div>
 
     <div x-show="!loading">
       <!-- Phase filter bar -->
-      <div class="flex items-center gap-2 px-6 py-3 border-b border-gray-800 flex-wrap">
+      <div class="flex items-center gap-2 px-6 py-3 border-b border-gray-200 dark:border-gray-800 flex-wrap">
         <button
           @click="filterPhase = ''"
           class="px-3 py-1 rounded-full text-xs font-medium transition-colors"
-          :class="filterPhase === '' ? 'bg-gray-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'"
+          :class="filterPhase === '' ? 'bg-gray-500 dark:bg-gray-600 text-white' : 'bg-gray-200 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
         >All <span x-text="'(' + workspaces.length + ')'"></span></button>
         <template x-for="phase in availablePhases()" :key="phase">
           <button
@@ -119,7 +154,7 @@
 
       <table class="w-full text-sm">
         <thead>
-          <tr class="border-b border-gray-800 text-gray-400 text-left">
+          <tr class="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 text-left">
             <th class="px-6 py-3 font-medium">Name</th>
             <th class="px-6 py-3 font-medium">Namespace</th>
             <th class="px-6 py-3 font-medium">Phase</th>
@@ -132,16 +167,16 @@
         <tbody>
           <template x-if="workspaces.filter(w => !filterPhase || w.terraformPhase === filterPhase).length === 0">
             <tr>
-              <td colspan="7" class="text-center text-gray-500 py-12" x-text="filterPhase ? 'No workspaces in ' + filterPhase + ' phase.' : 'No workspaces found.'"></td>
+              <td colspan="7" class="text-center text-gray-400 dark:text-gray-500 py-12" x-text="filterPhase ? 'No workspaces in ' + filterPhase + ' phase.' : 'No workspaces found.'"></td>
             </tr>
           </template>
           <template x-for="ws in workspaces.filter(w => !filterPhase || w.terraformPhase === filterPhase)" :key="ws.namespace + '/' + ws.name">
             <tr
-              class="border-b border-gray-700 hover:bg-gray-900 cursor-pointer transition-colors"
+              class="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-900 cursor-pointer transition-colors"
               @click="selectWorkspace(ws)"
             >
-              <td class="px-6 py-3 font-mono font-medium text-white" x-text="ws.name"></td>
-              <td class="px-6 py-3 text-gray-400" x-text="ws.namespace"></td>
+              <td class="px-6 py-3 font-mono font-medium text-gray-900 dark:text-white" x-text="ws.name"></td>
+              <td class="px-6 py-3 text-gray-500 dark:text-gray-400" x-text="ws.namespace"></td>
               <td class="px-6 py-3">
                 <span
                   class="px-2 py-0.5 rounded-full text-xs font-semibold"
@@ -155,9 +190,9 @@
                   x-text="ws.hasChanges ? 'yes' : 'no'"
                 ></span>
               </td>
-              <td class="px-6 py-3 text-gray-400" x-text="formatAge(ws.creationTimestamp)"></td>
-              <td class="px-6 py-3 text-gray-400" x-text="formatNextRefresh(ws.nextRefreshTimestamp)"></td>
-              <td class="px-6 py-3 text-red-400 text-xs truncate max-w-xs" x-text="ws.lastErrorMessage || '-'"></td>
+              <td class="px-6 py-3 text-gray-500 dark:text-gray-400" x-text="formatAge(ws.creationTimestamp)"></td>
+              <td class="px-6 py-3 text-gray-500 dark:text-gray-400" x-text="formatNextRefresh(ws.nextRefreshTimestamp)"></td>
+              <td class="px-6 py-3 text-red-500 dark:text-red-400 text-xs truncate max-w-xs" x-text="ws.lastErrorMessage || '-'"></td>
             </tr>
           </template>
         </tbody>
@@ -173,7 +208,7 @@
       <div class="min-w-0">
         <div class="flex items-center gap-3 flex-wrap">
           <h1
-            class="font-mono text-lg font-bold text-white"
+            class="font-mono text-lg font-bold text-gray-900 dark:text-white"
             x-text="selectedWorkspace ? selectedWorkspace.namespace + '/' + selectedWorkspace.name : ''"
           ></h1>
           <span
@@ -183,38 +218,38 @@
           ></span>
         </div>
         <p
-          class="text-gray-400 text-sm mt-1"
+          class="text-gray-500 dark:text-gray-400 text-sm mt-1"
           x-text="(detail ? detail.terraformMessage : (selectedWorkspace && selectedWorkspace.terraformMessage)) || ''"
         ></p>
       </div>
     </div>
 
     <!-- Tab Bar -->
-    <div class="flex border-b border-gray-800">
+    <div class="flex border-b border-gray-200 dark:border-gray-800">
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
-        :class="activeTab === 'overview' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        :class="activeTab === 'overview' ? 'border-indigo-500 text-gray-900 dark:text-white' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
         @click="activeTab = 'overview'; selectedPlan = null"
       >Overview</button>
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
-        :class="activeTab === 'plans' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        :class="activeTab === 'plans' ? 'border-indigo-500 text-gray-900 dark:text-white' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
         @click="activeTab = 'plans'; selectedPlan = null; ensurePlansLoaded()"
       >Plans</button>
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
-        :class="activeTab === 'output' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        :class="activeTab === 'output' ? 'border-indigo-500 text-gray-900 dark:text-white' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
         @click="activeTab = 'output'; selectedPlan = null; outputView = null"
       >Output</button>
       <button
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
-        :class="activeTab === 'currentRender' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+        :class="activeTab === 'currentRender' ? 'border-indigo-500 text-gray-900 dark:text-white' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
         @click="activeTab = 'currentRender'; selectedPlan = null"
       >Current Render</button>
     </div>
 
     <!-- Loading Detail -->
-    <p x-show="!detail" class="text-gray-500 mt-8">Loading...</p>
+    <p x-show="!detail" class="text-gray-400 dark:text-gray-500 mt-8">Loading...</p>
 
     <!-- Tab Content -->
     <div x-show="detail" class="mt-6">
@@ -232,10 +267,10 @@
             ></span>
           </dd>
 
-          <dt class="text-gray-400 self-center">Message</dt>
-          <dd class="text-gray-200" x-text="detail && detail.terraformMessage || '-'"></dd>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">Message</dt>
+          <dd class="text-gray-700 dark:text-gray-200" x-text="detail && detail.terraformMessage || '-'"></dd>
 
-          <dt class="text-gray-400 self-center">Has Changes</dt>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">Has Changes</dt>
           <dd>
             <span
               :class="detail && detail.hasChanges ? 'text-yellow-400' : 'text-gray-500'"
@@ -243,7 +278,7 @@
             ></span>
           </dd>
 
-          <dt class="text-gray-400 self-center">New Plan Needed</dt>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">New Plan Needed</dt>
           <dd>
             <span
               :class="detail && detail.newPlanNeeded ? 'text-yellow-400' : 'text-gray-500'"
@@ -251,7 +286,7 @@
             ></span>
           </dd>
 
-          <dt class="text-gray-400 self-center">New Apply Needed</dt>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">New Apply Needed</dt>
           <dd>
             <span
               :class="detail && detail.newApplyNeeded ? 'text-yellow-400' : 'text-gray-500'"
@@ -259,25 +294,25 @@
             ></span>
           </dd>
 
-          <dt class="text-gray-400 self-center">Retry Count</dt>
-          <dd class="text-gray-200" x-text="detail && detail.retryCount !== undefined ? detail.retryCount : '-'"></dd>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">Retry Count</dt>
+          <dd class="text-gray-700 dark:text-gray-200" x-text="detail && detail.retryCount !== undefined ? detail.retryCount : '-'"></dd>
 
-          <dt class="text-gray-400 self-center">Last Error</dt>
-          <dd class="text-red-400" x-text="detail && detail.lastErrorMessage || '-'"></dd>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">Last Error</dt>
+          <dd class="text-red-500 dark:text-red-400" x-text="detail && detail.lastErrorMessage || '-'"></dd>
 
-          <dt class="text-gray-400 self-center">Last Error Time</dt>
-          <dd class="text-gray-400" x-text="detail && detail.lastErrorTime ? formatAge(detail.lastErrorTime) + ' ago' : '-'"></dd>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">Last Error Time</dt>
+          <dd class="text-gray-500 dark:text-gray-400" x-text="detail && detail.lastErrorTime ? formatAge(detail.lastErrorTime) + ' ago' : '-'"></dd>
 
-          <dt class="text-gray-400 self-center">Last Execution</dt>
-          <dd class="text-gray-400" x-text="detail && detail.lastExecutionTime ? formatAge(detail.lastExecutionTime) + ' ago' : '-'"></dd>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">Last Execution</dt>
+          <dd class="text-gray-500 dark:text-gray-400" x-text="detail && detail.lastExecutionTime ? formatAge(detail.lastExecutionTime) + ' ago' : '-'"></dd>
 
-          <dt class="text-gray-400 self-center">Next Refresh</dt>
-          <dd class="text-gray-400" x-text="detail && formatNextRefresh(detail.nextRefreshTimestamp)"></dd>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">Next Refresh</dt>
+          <dd class="text-gray-500 dark:text-gray-400" x-text="detail && formatNextRefresh(detail.nextRefreshTimestamp)"></dd>
 
-          <dt class="text-gray-400 self-center">Tool Version</dt>
-          <dd class="font-mono text-gray-200" x-text="detail && (detail.toolVersion || detail.terraformVersion) || '-'"></dd>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">Tool Version</dt>
+          <dd class="font-mono text-gray-700 dark:text-gray-200" x-text="detail && (detail.toolVersion || detail.terraformVersion) || '-'"></dd>
 
-          <dt class="text-gray-400 self-center">Auto Apply</dt>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">Auto Apply</dt>
           <dd>
             <span
               :class="detail && detail.autoApply ? 'text-green-400' : 'text-gray-500'"
@@ -285,12 +320,12 @@
             ></span>
           </dd>
 
-          <dt class="text-gray-400 self-center">Destroy</dt>
-          <dd class="text-gray-200" x-text="detail && detail.destroy !== undefined ? String(detail.destroy) : '-'"></dd>
+          <dt class="text-gray-500 dark:text-gray-400 self-center">Destroy</dt>
+          <dd class="text-gray-700 dark:text-gray-200" x-text="detail && detail.destroy !== undefined ? String(detail.destroy) : '-'"></dd>
 
-          <template x-if="detail && (detail.hasManualDestroyAnnotation || (detail.deleting && detail.destroy === 'manual'))">
-            <dt class="text-gray-400 self-center">Manual Destroy</dt>
-          </template>
+            <template x-if="detail && (detail.hasManualDestroyAnnotation || (detail.deleting && detail.destroy === 'manual'))">
+              <dt class="text-gray-500 dark:text-gray-400 self-center">Manual Destroy</dt>
+            </template>
           <template x-if="detail && (detail.hasManualDestroyAnnotation || (detail.deleting && detail.destroy === 'manual'))">
             <dd class="flex items-center gap-2">
               <template x-if="!detail.hasManualDestroyAnnotation">
@@ -302,14 +337,14 @@
               <template x-if="detail.hasManualDestroyAnnotation">
                 <button
                   @click="patchAnnotation(detail.namespace, detail.name, 'tf-reconcile.lego.com/manual-destroy', '')"
-                  class="px-3 py-1 text-xs font-medium rounded bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
+                  class="px-3 py-1 text-xs font-medium rounded bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 transition-colors"
                 >Remove Manual Destroy</button>
               </template>
             </dd>
           </template>
 
           <template x-if="detail && (detail.hasManualApplyAnnotation || (detail.newApplyNeeded && !detail.autoApply))">
-            <dt class="text-gray-400 self-center">Manual Apply</dt>
+            <dt class="text-gray-500 dark:text-gray-400 self-center">Manual Apply</dt>
           </template>
           <template x-if="detail && (detail.hasManualApplyAnnotation || (detail.newApplyNeeded && !detail.autoApply))">
             <dd class="flex items-center gap-2">
@@ -322,7 +357,7 @@
               <template x-if="detail.hasManualApplyAnnotation">
                 <button
                   @click="patchAnnotation(detail.namespace, detail.name, 'tf-reconcile.lego.com/manual-apply', '')"
-                  class="px-3 py-1 text-xs font-medium rounded bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
+                  class="px-3 py-1 text-xs font-medium rounded bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 transition-colors"
                 >Remove Manual Apply</button>
               </template>
             </dd>
@@ -340,10 +375,10 @@
 
             <!-- Plan meta -->
             <dl class="grid grid-cols-[max-content_1fr] gap-x-8 gap-y-2 text-sm mb-4">
-              <dt class="text-gray-400 self-center">Name</dt>
-              <dd class="font-mono text-white" x-text="selectedPlan.name"></dd>
+              <dt class="text-gray-500 dark:text-gray-400 self-center">Name</dt>
+              <dd class="font-mono text-gray-900 dark:text-white" x-text="selectedPlan.name"></dd>
 
-              <dt class="text-gray-400 self-center">Phase</dt>
+              <dt class="text-gray-500 dark:text-gray-400 self-center">Phase</dt>
               <dd>
                 <span
                   class="px-2 py-0.5 rounded-full text-xs font-semibold"
@@ -352,46 +387,46 @@
                 ></span>
               </dd>
 
-              <dt class="text-gray-400 self-center">Changes</dt>
+              <dt class="text-gray-500 dark:text-gray-400 self-center">Changes</dt>
               <dd>
                 <span
-                  :class="selectedPlan.hasChanges ? 'text-yellow-400' : 'text-gray-500'"
+                  :class="selectedPlan.hasChanges ? 'text-yellow-500 dark:text-yellow-400' : 'text-gray-400 dark:text-gray-500'"
                   x-text="selectedPlan.hasChanges ? 'yes' : 'no'"
                 ></span>
               </dd>
 
-              <dt class="text-gray-400 self-center">Started</dt>
-              <dd class="text-gray-400" x-text="selectedPlan.startTime ? formatAge(selectedPlan.startTime) + ' ago' : '-'"></dd>
+              <dt class="text-gray-500 dark:text-gray-400 self-center">Started</dt>
+              <dd class="text-gray-500 dark:text-gray-400" x-text="selectedPlan.startTime ? formatAge(selectedPlan.startTime) + ' ago' : '-'"></dd>
 
-              <dt class="text-gray-400 self-center">Completed</dt>
-              <dd class="text-gray-400" x-text="selectedPlan.completionTime ? formatAge(selectedPlan.completionTime) + ' ago' : '-'"></dd>
+              <dt class="text-gray-500 dark:text-gray-400 self-center">Completed</dt>
+              <dd class="text-gray-500 dark:text-gray-400" x-text="selectedPlan.completionTime ? formatAge(selectedPlan.completionTime) + ' ago' : '-'"></dd>
 
               <template x-if="selectedPlan.message">
-                <dt class="text-gray-400 self-center">Message</dt>
+                <dt class="text-gray-500 dark:text-gray-400 self-center">Message</dt>
               </template>
               <template x-if="selectedPlan.message">
-                <dd class="text-gray-200" x-text="selectedPlan.message"></dd>
+                <dd class="text-gray-700 dark:text-gray-200" x-text="selectedPlan.message"></dd>
               </template>
             </dl>
 
             <!-- Output tab bar -->
-            <div class="flex border-b border-gray-800 mb-0 shrink-0">
+            <div class="flex border-b border-gray-200 dark:border-gray-800 mb-0 shrink-0">
               <button
                 class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
-                :class="planOutputTab === 'plan' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+                :class="planOutputTab === 'plan' ? 'border-indigo-500 text-gray-900 dark:text-white' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
                 @click="planOutputTab = 'plan'"
               >Plan</button>
               <button
                 class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors"
-                :class="planOutputTab === 'apply' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'"
+                :class="planOutputTab === 'apply' ? 'border-indigo-500 text-gray-900 dark:text-white' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
                 @click="planOutputTab = 'apply'"
               >Apply</button>
             </div>
 
             <!-- Output area -->
-            <div class="flex-1 overflow-y-auto bg-gray-900 rounded-b-lg border border-t-0 border-gray-800 p-4">
+            <div class="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded-b-lg border border-t-0 border-gray-200 dark:border-gray-800 p-4">
               <pre
-                class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words"
+                class="text-xs font-mono text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words"
                 x-text="planOutputTab === 'plan' ? (selectedPlan.planOutput || '(no output)') : (selectedPlan.applyOutput || '(no output)')"
               ></pre>
             </div>
@@ -403,15 +438,15 @@
         <template x-if="!selectedPlan">
           <div>
             <template x-if="plansLoading">
-              <p class="text-gray-500 text-sm">Loading plans...</p>
+              <p class="text-gray-400 dark:text-gray-500 text-sm">Loading plans...</p>
             </template>
             <template x-if="!plansLoading && plans.length === 0">
-              <p class="text-gray-500 text-sm">No plans found.</p>
+              <p class="text-gray-400 dark:text-gray-500 text-sm">No plans found.</p>
             </template>
             <template x-if="!plansLoading && plans.length > 0">
               <table class="w-full text-sm">
                 <thead>
-                  <tr class="border-b border-gray-800 text-gray-400 text-left">
+                  <tr class="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 text-left">
                     <th class="py-2 pr-6 font-medium">Name</th>
                     <th class="py-2 pr-6 font-medium">Phase</th>
                     <th class="py-2 pr-6 font-medium">Changes</th>
@@ -423,24 +458,24 @@
                 <tbody>
                   <template x-for="plan in plans" :key="plan.name">
                     <tr
-                      class="border-b border-gray-800 hover:bg-gray-900 cursor-pointer transition-colors"
+                      class="border-b border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 cursor-pointer transition-colors"
                       @click="selectedPlan = plan; planOutputTab = 'plan'"
                     >
-                      <td class="py-2 pr-6 font-mono text-white" x-text="plan.name"></td>
+                      <td class="py-2 pr-6 font-mono text-gray-900 dark:text-white" x-text="plan.name"></td>
                       <td class="py-2 pr-6">
                         <span
                           class="px-2 py-0.5 rounded-full text-xs font-semibold"
                           :class="phaseBadgeClass(plan.phase)"
                           x-text="plan.phase || '-'"
                         ></span>
-                        <span x-show="detail && detail.plan && detail.plan.name === plan.name" class="ml-2 text-xs text-indigo-400">current</span>
+                        <span x-show="detail && detail.plan && detail.plan.name === plan.name" class="ml-2 text-xs text-indigo-500 dark:text-indigo-400">current</span>
                       </td>
                       <td class="py-2 pr-6">
-                        <span :class="plan.hasChanges ? 'text-yellow-400' : 'text-gray-500'" x-text="plan.hasChanges ? 'yes' : 'no'"></span>
+                        <span :class="plan.hasChanges ? 'text-yellow-500 dark:text-yellow-400' : 'text-gray-400 dark:text-gray-500'" x-text="plan.hasChanges ? 'yes' : 'no'"></span>
                       </td>
-                      <td class="py-2 pr-6 text-gray-400 text-xs" x-text="plan.startTime ? formatAge(plan.startTime) + ' ago' : '-'"></td>
-                      <td class="py-2 pr-6 text-gray-400 text-xs" x-text="plan.completionTime ? formatAge(plan.completionTime) + ' ago' : '-'"></td>
-                      <td class="py-2 text-gray-400 text-xs truncate max-w-xs" x-text="plan.message || '-'"></td>
+                      <td class="py-2 pr-6 text-gray-500 dark:text-gray-400 text-xs" x-text="plan.startTime ? formatAge(plan.startTime) + ' ago' : '-'"></td>
+                      <td class="py-2 pr-6 text-gray-500 dark:text-gray-400 text-xs" x-text="plan.completionTime ? formatAge(plan.completionTime) + ' ago' : '-'"></td>
+                      <td class="py-2 text-gray-500 dark:text-gray-400 text-xs truncate max-w-xs" x-text="plan.message || '-'"></td>
                     </tr>
                   </template>
                 </tbody>
@@ -456,14 +491,14 @@
 
         <!-- Sub-navigation -->
         <div class="flex items-center gap-2 mb-3 flex-wrap">
-          <span class="text-xs text-gray-500" x-text="activeOutputLabel(detail)"></span>
+          <span class="text-xs text-gray-400 dark:text-gray-500" x-text="activeOutputLabel(detail)"></span>
           <template x-if="detail && (detail.lastPlanOutput || (detail.plan && detail.plan.planOutput))">
             <button
               @click="outputView = (outputView === 'plan' ? null : 'plan')"
               class="px-3 py-1.5 text-xs font-medium rounded border transition-colors"
               :class="resolvedOutputView(detail) === 'plan'
-                ? (outputView === 'plan' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-gray-800 border-indigo-500 text-indigo-300 hover:bg-gray-700')
-                : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white'"
+                ? (outputView === 'plan' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-white dark:bg-gray-800 border-indigo-500 text-indigo-600 dark:text-indigo-300 hover:bg-gray-50 dark:hover:bg-gray-700')
+                : 'bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white'"
             >Plan</button>
           </template>
           <template x-if="detail && (detail.lastApplyOutput || (detail.plan && detail.plan.applyOutput))">
@@ -471,8 +506,8 @@
               @click="outputView = (outputView === 'apply' ? null : 'apply')"
               class="px-3 py-1.5 text-xs font-medium rounded border transition-colors"
               :class="resolvedOutputView(detail) === 'apply'
-                ? (outputView === 'apply' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-gray-800 border-indigo-500 text-indigo-300 hover:bg-gray-700')
-                : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white'"
+                ? (outputView === 'apply' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-white dark:bg-gray-800 border-indigo-500 text-indigo-600 dark:text-indigo-300 hover:bg-gray-50 dark:hover:bg-gray-700')
+                : 'bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white'"
             >Apply</button>
           </template>
           <template x-if="detail && detail.initOutput">
@@ -480,22 +515,22 @@
               @click="outputView = (outputView === 'init' ? null : 'init')"
               class="px-3 py-1.5 text-xs font-medium rounded border transition-colors"
               :class="resolvedOutputView(detail) === 'init'
-                ? (outputView === 'init' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-gray-800 border-indigo-500 text-indigo-300 hover:bg-gray-700')
-                : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white'"
+                ? (outputView === 'init' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-white dark:bg-gray-800 border-indigo-500 text-indigo-600 dark:text-indigo-300 hover:bg-gray-50 dark:hover:bg-gray-700')
+                : 'bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white'"
             >Init</button>
           </template>
         </div>
 
         <!-- Output area -->
-        <div class="flex-1 overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="currentOutputContent(detail)"></pre>
+        <div class="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-4">
+          <pre class="text-xs font-mono text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words" x-text="currentOutputContent(detail)"></pre>
         </div>
 
       </div>
 
       <!-- Current Render Tab -->
-      <div x-show="activeTab === 'currentRender'" class="h-[calc(100vh-320px)] overflow-y-auto bg-gray-900 rounded-lg border border-gray-800 p-4">
-        <pre class="text-xs font-mono text-gray-300 whitespace-pre-wrap break-words" x-text="detail && detail.currentRender || '(no output)'"></pre>
+      <div x-show="activeTab === 'currentRender'" class="h-[calc(100vh-320px)] overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-4">
+        <pre class="text-xs font-mono text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words" x-text="detail && detail.currentRender || '(no output)'"></pre>
       </div>
 
     </div>
@@ -523,11 +558,30 @@
         selectedContext: '',
         selectedNamespace: '',
 
+        darkMode: false,
+
         init() {
+          const saved = localStorage.getItem('darkMode');
+          this.darkMode = saved !== null ? saved === 'true' : true;
+          this.applyDarkMode();
           this.fetchContexts();
           this.fetchNamespaces();
           this.fetchWorkspaceList();
           this.connectSSE();
+        },
+
+        toggleDarkMode() {
+          this.darkMode = !this.darkMode;
+          localStorage.setItem('darkMode', this.darkMode);
+          this.applyDarkMode();
+        },
+
+        applyDarkMode() {
+          if (this.darkMode) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
         },
 
         fetchContexts() {
@@ -697,15 +751,15 @@
         phaseBadgeClass(phase) {
           switch (phase) {
             case 'Completed':
-              return 'bg-green-900 text-green-300';
+              return 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300';
             case 'Planning':
             case 'Applying':
             case 'Initializing':
-              return 'bg-yellow-900 text-yellow-300';
+              return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300';
             case 'Errored':
-              return 'bg-red-900 text-red-300';
+              return 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300';
             default:
-              return 'bg-gray-800 text-gray-400';
+              return 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400';
           }
         },
 
