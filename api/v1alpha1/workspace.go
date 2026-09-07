@@ -32,6 +32,7 @@ const (
 const (
 	ManualApplyAnnotation   = "tf-reconcile.lego.com/manual-apply"
 	ManualDestroyAnnotation = "tf-reconcile.lego.com/manual-destroy"
+	ManualRetryAnnotation   = "tf-reconcile.lego.com/manual-retry"
 	WorkspacePlanLabel      = "tf-reconcile.lego.com/workspace"
 	WorkspaceFinalizer      = "tf-reconcile.lego.com/finalizer"
 )
@@ -336,6 +337,11 @@ func (w *Workspace) ManualApplyRequested() bool {
 
 func (w *Workspace) ManualDestroyRequested() bool {
 	_, ok := w.Annotations[ManualDestroyAnnotation]
+	return ok
+}
+
+func (w *Workspace) ManualRetryRequested() bool {
+	_, ok := w.Annotations[ManualRetryAnnotation]
 	return ok
 }
 

@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -498,6 +499,90 @@ resource "random_pet" "name" {
 
 		assert.Equal(t, TFPhaseCompleted, ws.Status.TerraformPhase)
 		assert.NotContains(t, ws.Status.TerraformMessage, "Failed")
+	})
+}
+
+func TestHandleManualRetry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
+
+	newReconciler := func(objs ...client.Object) (*WorkspaceReconciler, client.Client) {
+		builder := clientfake.NewClientBuilder().WithScheme(scheme)
+		for _, o := range objs {
+			builder = builder.WithStatusSubresource(o)
+		}
+		c := builder.WithObjects(objs...).Build()
+		return &WorkspaceReconciler{
+			Client:   c,
+			Scheme:   scheme,
+			Recorder: record.NewFakeRecorder(32),
+			leases:   &sync.Map{},
+		}, c
+	}
+
+	backoffWs := func(name string) *tfv1alphav1.Workspace {
+		ws := newWs(name, "some-source")
+		ws.Status.Backoff = tfv1alphav1.BackoffStatus{
+			NextRetryTime: &metav1.Time{Time: time.Now().Add(10 * time.Minute)},
+			RetryCount:    3,
+		}
+		return ws
+	}
+
+	t.Run("no-op when annotation absent", func(t *testing.T) {
+		ws := backoffWs("retry-noop")
+		r, c := newReconciler(ws)
+
+		_, err, ret := r.handleManualRetry(t.Context(), ws)
+		require.NoError(t, err)
+		assert.False(t, ret)
+
+		var got tfv1alphav1.Workspace
+		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(ws), &got))
+		// backoff untouched
+		assert.NotNil(t, got.Status.Backoff.NextRetryTime)
+		assert.Equal(t, int32(3), got.Status.Backoff.RetryCount)
+	})
+
+	t.Run("clears backoff and annotation when requested", func(t *testing.T) {
+		ws := backoffWs("retry-clears")
+		ws.Annotations = map[string]string{
+			tfv1alphav1.ManualRetryAnnotation: "true",
+		}
+		r, c := newReconciler(ws)
+
+		// metav1.Now() truncates to seconds, so compare against a second-truncated baseline
+		before := metav1.Now().Add(-time.Second)
+		_, err, ret := r.handleManualRetry(t.Context(), ws)
+		require.NoError(t, err)
+		// ret is false so reconciliation continues after clearing backoff
+		assert.False(t, ret)
+
+		var got tfv1alphav1.Workspace
+		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(ws), &got))
+
+		assert.Nil(t, got.Status.Backoff.NextRetryTime)
+		assert.Equal(t, int32(0), got.Status.Backoff.RetryCount)
+		assert.False(t, got.Status.NextRefreshTimestamp.IsZero(), "next refresh should be set")
+		assert.False(t, got.Status.NextRefreshTimestamp.Time.Before(before))
+
+		_, ok := got.Annotations[tfv1alphav1.ManualRetryAnnotation]
+		assert.False(t, ok, "manual retry annotation should be removed")
+	})
+
+	t.Run("returns error when workspace missing", func(t *testing.T) {
+		ws := backoffWs("retry-missing")
+		ws.Annotations = map[string]string{
+			tfv1alphav1.ManualRetryAnnotation: "true",
+		}
+		// reconciler with no objects: Get inside RetryOnConflict fails
+		r, _ := newReconciler()
+
+		_, err, ret := r.handleManualRetry(t.Context(), ws)
+		require.Error(t, err)
+		assert.True(t, ret)
+		assert.Contains(t, err.Error(), "failed to clear backoff during manual retry")
 	})
 }
 

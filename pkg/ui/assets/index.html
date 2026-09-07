@@ -362,7 +362,18 @@
               </template>
             </dd>
           </template>
-
+          <template x-if="detail">
+              <dt class="text-gray-400 self-center">Force Retry</dt>
+          </template>
+          <template x-if="detail">
+            <dd>
+              <button
+                    @click="patchAnnotation(detail.namespace, detail.name, 'tf-reconcile.lego.com/manual-retry', 'true')"
+                    class="px-3 py-1 text-xs font-medium rounded bg-amber-600 hover:bg-amber-500 text-white transition-colors"
+              >Retry Now
+              </button>
+            </dd>
+          </template>
         </dl>
       </div>
 
