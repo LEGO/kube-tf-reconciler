@@ -77,9 +77,12 @@
 
       <!-- Dark mode toggle -->
       <button
+        type="button"
         @click="toggleDarkMode()"
         class="p-1.5 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
         :title="darkMode ? 'Switch to light mode' : 'Switch to dark mode'"
+        :aria-label="darkMode ? 'Switch to light mode' : 'Switch to dark mode'"
+        :aria-pressed="darkMode"
       >
         <!-- Sun icon (shown in dark mode) -->
         <svg x-show="darkMode" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
