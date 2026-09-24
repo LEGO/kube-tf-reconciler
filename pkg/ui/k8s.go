@@ -7,7 +7,6 @@ import (
 	"time"
 
 	v1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,15 +40,21 @@ func listKubeContexts() ([]string, string, error) {
 	return names, config.CurrentContext, nil
 }
 
-// listNamespaces returns all namespace names visible to the client.
+// listNamespaces returns the names of namespaces that contain at least one
+// Workspace, so the UI only offers namespaces the user can actually work in.
 func listNamespaces(ctx context.Context, k8sClient client.Client) ([]string, error) {
-	var nsList corev1.NamespaceList
-	if err := k8sClient.List(ctx, &nsList); err != nil {
-		return nil, fmt.Errorf("listing namespaces: %w", err)
+	var list v1alpha1.WorkspaceList
+	if err := k8sClient.List(ctx, &list); err != nil {
+		return nil, fmt.Errorf("listing workspaces: %w", err)
 	}
-	names := make([]string, 0, len(nsList.Items))
-	for _, ns := range nsList.Items {
-		names = append(names, ns.Name)
+	seen := make(map[string]struct{}, len(list.Items))
+	names := make([]string, 0, len(list.Items))
+	for _, ws := range list.Items {
+		if _, ok := seen[ws.Namespace]; ok {
+			continue
+		}
+		seen[ws.Namespace] = struct{}{}
+		names = append(names, ws.Namespace)
 	}
 	sort.Strings(names)
 	return names, nil
