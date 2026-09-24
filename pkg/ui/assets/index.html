@@ -571,14 +571,133 @@
 
         darkMode: false,
 
+        // UI state parsed from the URL on load, applied once the relevant data arrives.
+        _pending: null,
+        _pendingPlan: null,
+
         init() {
           const saved = localStorage.getItem('darkMode');
           this.darkMode = saved !== null ? saved === 'true' : true;
           this.applyDarkMode();
-          this.fetchContexts();
-          this.fetchNamespaces();
-          this.fetchWorkspaceList();
+
+          // Restore UI state from the URL so reloads and shared links land on the same view.
+          this._pending = this.parseUrlState();
+
           this.connectSSE();
+          this.bootstrap();
+          this.setupUrlSync();
+        },
+
+        parseUrlState() {
+          const p = new URLSearchParams(location.search);
+          return {
+            context: p.get('context'),
+            namespace: p.get('namespace'), // '' means "all namespaces"; null means unset
+            phase: p.get('phase'),         // list-view phase filter
+            ws: p.get('ws'),               // "namespace/name"
+            tab: p.get('tab'),
+            plan: p.get('plan'),
+            planTab: p.get('planTab'),
+            output: p.get('output'),
+          };
+        },
+
+        bootstrap() {
+          const pend = this._pending || {};
+          fetch('/api/contexts')
+            .then(r => r.json())
+            .then(data => {
+              this.contexts = data.contexts || [];
+              const serverContext = data.current || '';
+              return fetch('/api/namespaces')
+                .then(r => r.json())
+                .then(nsData => {
+                  this.namespaces = nsData.namespaces || [];
+                  const serverNamespace = nsData.current || '';
+
+                  const targetContext = pend.context || serverContext;
+                  const targetNamespace = (pend.namespace !== null && pend.namespace !== undefined)
+                    ? pend.namespace
+                    : serverNamespace;
+
+                  this.selectedContext = targetContext;
+                  this.selectedNamespace = targetNamespace;
+
+                  if (targetContext !== serverContext || targetNamespace !== serverNamespace) {
+                    // The URL asks for a different context/namespace than the server session.
+                    this.postSwitch(targetContext, targetNamespace);
+                  } else {
+                    this.fetchWorkspaceList();
+                  }
+                });
+            })
+            .catch(() => {
+              this.selectedContext = pend.context || '';
+              this.selectedNamespace = pend.namespace || '';
+              this.fetchWorkspaceList();
+            });
+        },
+
+        applyPendingSelection() {
+          const pend = this._pending;
+          if (!pend) return;
+          this._pending = null; // apply exactly once
+
+          if (pend.phase) this.filterPhase = pend.phase;
+
+          if (!pend.ws) return;
+          const idx = pend.ws.indexOf('/');
+          if (idx < 0) return;
+          const ns = pend.ws.slice(0, idx);
+          const name = pend.ws.slice(idx + 1);
+
+          const found = this.workspaces.find(w => w.namespace === ns && w.name === name);
+          this.selectedWorkspace = found || { namespace: ns, name };
+          this.activeTab = pend.tab || 'overview';
+          this.planOutputTab = pend.planTab || 'plan';
+          this.outputView = pend.output || null;
+          this.detail = null;
+          this.plans = [];
+          this.selectedPlan = null;
+          this.fetchDetail(ns, name);
+
+          if (this.activeTab === 'plans') {
+            this._pendingPlan = pend.plan || null;
+            this.ensurePlansLoaded();
+          }
+        },
+
+        setupUrlSync() {
+          const sync = () => this.syncUrl();
+          this.$watch('selectedContext', sync);
+          this.$watch('selectedNamespace', sync);
+          this.$watch('filterPhase', sync);
+          this.$watch('selectedWorkspace', sync);
+          this.$watch('activeTab', sync);
+          this.$watch('selectedPlan', sync);
+          this.$watch('planOutputTab', sync);
+          this.$watch('outputView', sync);
+        },
+
+        syncUrl() {
+          const p = new URLSearchParams();
+          if (this.selectedContext) p.set('context', this.selectedContext);
+          // Always record the namespace so an explicit "all namespaces" round-trips.
+          p.set('namespace', this.selectedNamespace || '');
+          if (this.filterPhase) p.set('phase', this.filterPhase);
+
+          if (this.selectedWorkspace) {
+            p.set('ws', this.selectedWorkspace.namespace + '/' + this.selectedWorkspace.name);
+            if (this.activeTab && this.activeTab !== 'overview') p.set('tab', this.activeTab);
+            if (this.activeTab === 'plans' && this.selectedPlan) {
+              p.set('plan', this.selectedPlan.name);
+              if (this.planOutputTab && this.planOutputTab !== 'plan') p.set('planTab', this.planOutputTab);
+            }
+            if (this.activeTab === 'output' && this.outputView) p.set('output', this.outputView);
+          }
+
+          const qs = p.toString();
+          history.replaceState(null, '', qs ? '?' + qs : location.pathname);
         },
 
         toggleDarkMode() {
@@ -593,16 +712,6 @@
           } else {
             document.documentElement.classList.remove('dark');
           }
-        },
-
-        fetchContexts() {
-          fetch('/api/contexts')
-            .then(r => r.json())
-            .then(data => {
-              this.contexts = data.contexts || [];
-              this.selectedContext = data.current || '';
-            })
-            .catch(() => {});
         },
 
         fetchNamespaces() {
@@ -670,9 +779,11 @@
             .then(data => {
               this.workspaces = data;
               this.loading = false;
+              this.applyPendingSelection();
             })
             .catch(() => {
               this.loading = false;
+              this.applyPendingSelection();
             });
         },
 
@@ -720,8 +831,16 @@
           this.plansLoading = true;
           fetch(`/api/workspaces/${this.selectedWorkspace.namespace}/${this.selectedWorkspace.name}/plans`)
             .then(r => r.json())
-            .then(data => { this.plans = data; this.plansLoading = false; })
-            .catch(() => { this.plansLoading = false; });
+            .then(data => {
+              this.plans = data;
+              this.plansLoading = false;
+              if (this._pendingPlan) {
+                const p = this.plans.find(pl => pl.name === this._pendingPlan);
+                if (p) this.selectedPlan = p;
+                this._pendingPlan = null;
+              }
+            })
+            .catch(() => { this.plansLoading = false; this._pendingPlan = null; });
         },
 
         resolvedOutputView(detail) {
