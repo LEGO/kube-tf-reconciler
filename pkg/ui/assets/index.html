@@ -5,8 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>kube-tf-reconciler</title>
   <script>
-    tailwind.config = { darkMode: 'class' };
-
     // Apply dark mode immediately to avoid flash
     (function () {
       try {
@@ -19,6 +17,11 @@
     })();
   </script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Must run after the Tailwind CDN script defines the global, otherwise the
+    // config is never applied and dark mode falls back to `media` (OS setting).
+    tailwind.config = { darkMode: 'class' };
+  </script>
   <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <style>
     [x-cloak] { display: none !important; }
