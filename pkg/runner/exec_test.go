@@ -89,6 +89,51 @@ func TestWithOutputStream(t *testing.T) {
 	}
 }
 
+func TestApplyUsesSavedPlan(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "fake-iac")
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE_FILE\"\n"), 0755))
+
+	tests := []struct {
+		name string
+		new  func(t *testing.T, workDir string) IaCTool
+	}{
+		{
+			name: "terraform",
+			new: func(t *testing.T, workDir string) IaCTool {
+				tf, err := tfexec.NewTerraform(workDir, script)
+				require.NoError(t, err)
+				return NewTerraformTool(tf)
+			},
+		},
+		{
+			name: "opentofu",
+			new: func(t *testing.T, workDir string) IaCTool {
+				tofu, err := tofuexec.NewTofu(workDir, script)
+				require.NoError(t, err)
+				return NewTofuTool(tofu)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			capturePath := filepath.Join(t.TempDir(), "args")
+			tool := tt.new(t, workDir)
+			require.NoError(t, tool.SetEnv(map[string]string{"CAPTURE_FILE": capturePath}))
+
+			require.NoError(t, tool.Apply(t.Context(), "saved.plan"))
+
+			args, err := os.ReadFile(capturePath)
+			require.NoError(t, err)
+			captured := strings.Fields(string(args))
+			require.NotEmpty(t, captured)
+			assert.Equal(t, "apply", captured[0])
+			assert.Equal(t, "saved.plan", captured[len(captured)-1])
+		})
+	}
+}
+
 func TestMultipleVersions(t *testing.T) {
 	ctx := t.Context()
 
