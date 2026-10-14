@@ -1,5 +1,7 @@
 package controller
 
+import "time"
+
 type Config struct {
 	Port                 string
 	ProbeAddr            string
@@ -9,6 +11,7 @@ type Config struct {
 	LeaderElectionID     string
 	EnableLeaderElection bool
 	WorkspacePath        string
+	ForceInitInterval    time.Duration
 }
 
 func DefaultConfig() Config {
@@ -19,5 +22,6 @@ func DefaultConfig() Config {
 		Namespace:            "krec",
 		EnableLeaderElection: false,
 		WorkspacePath:        "./.testdata",
+		ForceInitInterval:    6 * time.Hour,
 	}
 }

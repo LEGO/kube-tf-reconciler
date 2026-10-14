@@ -45,9 +45,10 @@ import (
 const (
 	DebugLevel = 2
 
-	defaultPlanHistoryLimit = 3
-	planCreationTimeout     = 2 * time.Second
-	nextRefreshInterval     = 30 * time.Minute
+	defaultPlanHistoryLimit  = 3
+	planCreationTimeout      = 2 * time.Second
+	nextRefreshInterval      = 30 * time.Minute
+	defaultForceInitInterval = 6 * time.Hour
 
 	TFErrEventReason      = "TerraformError"
 	TFPlanEventReason     = "TerraformPlan"
@@ -120,6 +121,8 @@ type WorkspaceReconciler struct {
 	Tf       *runner.Exec
 	Renderer render.Renderer
 	leases   *sync.Map
+
+	ForceInitInterval time.Duration
 }
 
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -179,11 +182,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Record reconciliation attempt
 	metrics.RecordReconciliation(ws.Namespace, ws.Name)
 
+	forceInit := ws.ManualRetryRequested()
+
 	if res, err, ret := r.handleManualRetry(ctx, ws); ret {
 		return res, err
 	}
 
-	res, err, ret, tool := r.setupTerraformForWorkspace(ctx, ws)
+	res, err, ret, tool, envs := r.setupTerraformForWorkspace(ctx, ws)
 	if ret {
 		if err != nil {
 			err = fmt.Errorf("setupTerraformForWorkspace: %w", err)
@@ -202,7 +207,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	if res, err, ret = r.handleRefreshDependencies(ctx, ws, tool); ret {
+	if res, err, ret = r.handleRefreshDependencies(ctx, ws, tool, envs, forceInit); ret {
 		if err != nil {
 			err = fmt.Errorf("handleRefreshDependencies: %w", err)
 			r.backoff(ctx, ws)
@@ -279,8 +284,26 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfv1alpha
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool) (ctrl.Result, error, bool) {
+func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool, envs map[string]string, forceInit bool) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
+
+	log.V(DebugLevel).Info("refresh dependencies starting")
+	defer log.V(DebugLevel).Info("refresh dependencies completed")
+
+	skip, reason := r.initSkipDecision(ws, envs, forceInit)
+	if skip {
+		log.Info("skipping init and validate, inputs unchanged and modules pinned", "workspace", ws.Name)
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseInitializing, fmt.Sprintf("%s init skipped: %s", capitalize(tool.Name()), reason), func(s *tfv1alphav1.WorkspaceStatus) {
+			s.LastErrorTime = nil
+			s.LastErrorMessage = ""
+			s.LastPlanOutput = ""
+			s.LastApplyOutput = ""
+			s.InitOutput = fmt.Sprintf("%s init skipped: %s", capitalize(tool.Name()), reason)
+		})
+
+		return r.decidePlanAfterInit(ctx, ws, "")
+	}
+	log.V(DebugLevel).Info("running full init", "reason", reason)
 
 	_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseInitializing, fmt.Sprintf("Initializing %s workspace", capitalize(tool.Name())), func(s *tfv1alphav1.WorkspaceStatus) {
 		// Reset all debug information
@@ -291,8 +314,9 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 		s.InitOutput = ""
 	})
 
-	log.V(DebugLevel).Info("refresh dependencies starting")
-	defer log.V(DebugLevel).Info("refresh dependencies completed")
+	if err := r.Tf.RemoveInitMarker(ws); err != nil {
+		log.Error(err, "failed to remove init marker", "workspace", ws.Name)
+	}
 
 	initOutputCh, wg := r.streamOutput(ctx, ws, func(ws *tfv1alphav1.Workspace, output string) {
 		ws.Status.InitOutput = output
@@ -351,6 +375,8 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 		return ctrl.Result{}, fmt.Errorf("%s validation failed: %s", tool.Name(), diagnosticsMsg), true
 	}
 
+	r.recordSuccessfulInit(ctx, ws, envs)
+
 	sum, err := r.Tf.CalculateChecksum(ws)
 	if err != nil {
 		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to calculate dependency hash: %v", err)
@@ -358,8 +384,102 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 		return ctrl.Result{}, err, true
 	}
 
+	return r.decidePlanAfterInit(ctx, ws, sum)
+}
+
+func (r *WorkspaceReconciler) initSkipDecision(ws *tfv1alphav1.Workspace, envs map[string]string, forceInit bool) (bool, string) {
+	switch {
+	case forceInit:
+		return false, "manual retry requested"
+	case !ws.DeletionTimestamp.IsZero():
+		return false, "workspace is being deleted"
+	case ws.Status.ObservedGeneration != ws.Generation:
+		return false, "workspace spec changed"
+	case ws.Status.TerraformPhase != TFPhaseCompleted || ws.Status.Backoff.RetryCount > 0 || !ws.Status.ValidRender:
+		return false, "previous reconciliation did not complete successfully"
+	case ws.Spec.Module == nil || !runner.IsPinnedModuleSource(ws.Spec.Module.Source, ws.Spec.Module.Version):
+		return false, "module source is not pinned to an immutable revision"
+	}
+
+	marker, err := r.Tf.ReadInitMarker(ws)
+	switch {
+	case err != nil:
+		return false, fmt.Sprintf("failed to read init marker: %v", err)
+	case marker == nil:
+		return false, "no previous successful init recorded"
+	case marker.BootID != r.Tf.BootID:
+		return false, "first init since operator start"
+	case marker.Generation != ws.Generation:
+		return false, "previous init was for another generation"
+	case time.Since(marker.InitializedAt) > r.forceInitInterval():
+		return false, fmt.Sprintf("last full init is older than %s", r.forceInitInterval())
+	}
+
+	pinned, err := r.Tf.NestedModulesPinned(ws)
+	if err != nil {
+		return false, fmt.Sprintf("cannot verify installed modules: %v", err)
+	}
+	if !pinned {
+		return false, "a nested module source is not pinned to an immutable revision"
+	}
+
+	fingerprint, err := r.Tf.InitFingerprint(ws, envs)
+	if err != nil {
+		return false, fmt.Sprintf("failed to calculate init fingerprint: %v", err)
+	}
+	if fingerprint != marker.Fingerprint {
+		return false, "init inputs changed"
+	}
+	// Another replica may have run a newer init, e.g. one that upgraded a provider
+	if fingerprint != ws.Status.InitFingerprint {
+		return false, "local installation differs from the last init by any replica"
+	}
+
+	return true, fmt.Sprintf("inputs unchanged since %s", marker.InitializedAt.UTC().Format(time.RFC3339))
+}
+
+func (r *WorkspaceReconciler) recordSuccessfulInit(ctx context.Context, ws *tfv1alphav1.Workspace, envs map[string]string) {
+	log := logf.FromContext(ctx)
+
+	fingerprint, err := r.Tf.InitFingerprint(ws, envs)
+	if err != nil {
+		log.Error(err, "failed to calculate init fingerprint, init will not be skipped next time", "workspace", ws.Name)
+		return
+	}
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+		old := ws.DeepCopy()
+		ws.Status.InitFingerprint = fingerprint
+		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	})
+	if err != nil {
+		log.Error(err, "failed to store init fingerprint, init will not be skipped next time", "workspace", ws.Name)
+		return
+	}
+
+	if err := r.Tf.WriteInitMarker(ws, fingerprint); err != nil {
+		log.Error(err, "failed to write init marker, init will not be skipped next time", "workspace", ws.Name)
+	}
+}
+
+func (r *WorkspaceReconciler) forceInitInterval() time.Duration {
+	if r.ForceInitInterval > 0 {
+		return r.ForceInitInterval
+	}
+	return defaultForceInitInterval
+}
+
+// An empty sum means init was skipped, a plan is then always requested so drift is still detected.
+func (r *WorkspaceReconciler) decidePlanAfterInit(ctx context.Context, ws *tfv1alphav1.Workspace, sum string) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+	var err error
+
 	workspaceUnchanged := ws.Status.ObservedGeneration == ws.Generation
-	checksumUnchanged := ws.Status.CurrentContentHash == sum && ws.Status.CurrentContentHash != ""
+	initSkipped := sum == ""
+	checksumUnchanged := !initSkipped && ws.Status.CurrentContentHash == sum && ws.Status.CurrentContentHash != ""
 	hasPlan := ws.Status.CurrentPlan != nil
 	isDeleting := !ws.DeletionTimestamp.IsZero()
 
@@ -401,7 +521,9 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 			return err
 		}
 		old := ws.DeepCopy()
-		ws.Status.CurrentContentHash = sum
+		if !initSkipped {
+			ws.Status.CurrentContentHash = sum
+		}
 		ws.Status.NewPlanNeeded = true
 
 		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
@@ -596,7 +718,7 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool, runner.IaCTool) {
+func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool, runner.IaCTool, map[string]string) {
 	log := logf.FromContext(ctx)
 	defer log.V(DebugLevel).Info("setup terraform completed")
 	log.V(DebugLevel).Info("setup terraform starting")
@@ -605,21 +727,21 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 	if err != nil {
 		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to setup workspace: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to setup workspace: %v", err), nil)
-		return ctrl.Result{}, err, true, nil
+		return ctrl.Result{}, err, true, nil, nil
 	}
 
 	envs, err := r.getEnvsForExecution(ctx, ws)
 	if err != nil {
 		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to get envs for execution: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to get envs for execution: %v", err), nil)
-		return ctrl.Result{}, err, true, nil
+		return ctrl.Result{}, err, true, nil, nil
 	}
 
 	tool, terraformRCPath, err := r.Tf.GetIaCToolForWorkspace(ctx, ws)
 	if err != nil {
 		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to get IaC tool executable: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to get IaC tool executable: %v", err), nil)
-		return ctrl.Result{}, err, true, nil
+		return ctrl.Result{}, err, true, nil, nil
 	}
 
 	envs["HOME"] = os.Getenv("HOME")
@@ -635,10 +757,10 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 	if err != nil {
 		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to set %s env: %v", tool.Name(), err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to set %s env: %v", tool.Name(), err), nil)
-		return ctrl.Result{}, err, true, nil
+		return ctrl.Result{}, err, true, nil, nil
 	}
 
-	return ctrl.Result{}, nil, false, tool
+	return ctrl.Result{}, nil, false, tool, envs
 }
 
 func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool) (ctrl.Result, error, bool) {

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -27,10 +28,11 @@ type Exec struct {
 	installDir     string
 	WorkspacesDir  string
 	PluginCacheDir string
+	BootID         string
 
 	installedVersions map[string]string
 	installMutex      sync.RWMutex
-	providerInitMutex          sync.Mutex
+	providerInitMutex sync.Mutex
 
 	outputStreamReader    io.ReadCloser
 	outputStreamWriter    io.WriteCloser
@@ -66,10 +68,11 @@ func New(rootDir string) *Exec {
 	}
 
 	return &Exec{
-		RootDir:                    rootDir,
-		installDir:                 installDir,
-		WorkspacesDir:              workspacesDir,
-		PluginCacheDir:             pluginCacheDir,
+		RootDir:           rootDir,
+		installDir:        installDir,
+		WorkspacesDir:     workspacesDir,
+		PluginCacheDir:    pluginCacheDir,
+		BootID:            rand.Text(),
 		installedVersions: make(map[string]string),
 	}
 }
@@ -217,16 +220,7 @@ func (e *Exec) GetIaCToolForWorkspace(ctx context.Context, ws *tfreconcilev1alph
 		}
 	}
 
-	tool := ws.Spec.Tool
-	if tool == "" {
-		tool = tfreconcilev1alpha1.ToolTerraform
-	}
-
-	iacVersion := ws.Spec.ToolVersion
-	if iacVersion == "" && tool == tfreconcilev1alpha1.ToolTerraform {
-		// backwards compatibility for the deprecated terraformVersion field
-		iacVersion = ws.Spec.TerraformVersion
-	}
+	tool, iacVersion := ResolveTool(ws)
 	if iacVersion == "" {
 		return nil, "", fmt.Errorf("toolVersion is required when tool is %s", tool)
 	}

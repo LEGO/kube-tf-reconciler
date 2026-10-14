@@ -323,6 +323,10 @@ spec:
                 description: HasChanges indicates whether the last plan contained
                   changes
                 type: boolean
+              initFingerprint:
+                description: InitFingerprint identifies the last successful init by
+                  any replica
+                type: string
               initOutput:
                 description: InitOutput is the result of initialising dependencies
                   in the workspace

@@ -261,6 +261,9 @@ type WorkspaceStatus struct {
 	// changes in modules that are not evident in the workspace spec (e.g. git modules)
 	// +kubebuilder:validation:Optional
 	CurrentContentHash string `json:"currentContentHash"`
+	// InitFingerprint identifies the last successful init by any replica
+	// +kubebuilder:validation:Optional
+	InitFingerprint string `json:"initFingerprint,omitempty"`
 	// NextRefreshTimestamp is the next time the workspace will be refreshed
 	// +kubebuilder:validation:Optional
 	NextRefreshTimestamp metav1.Time `json:"nextRefreshTimestamp"`
