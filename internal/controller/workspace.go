@@ -2,10 +2,7 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"maps"
 	"math"
@@ -14,7 +11,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,10 +57,6 @@ const (
 
 	planOutputPath = "plan.out"
 
-	planWorkspaceGenerationAnnotation = "tf-reconcile.lego.com/plan-workspace-generation"
-	planContentHashAnnotation         = "tf-reconcile.lego.com/plan-content-hash"
-	planDigestAnnotation              = "tf-reconcile.lego.com/plan-digest"
-
 	// Terraform execution phases
 	TFPhaseIdle         = ""
 	TFPhaseInitializing = "Initializing"
@@ -73,20 +65,6 @@ const (
 	TFPhaseCompleted    = "Completed"
 	TFPhaseErrored      = "Errored"
 )
-
-type savedPlanIdentity struct {
-	workspaceGeneration int64
-	contentHash         string
-	digest              string
-}
-
-type savedPlanIdentityMismatchError struct {
-	reason string
-}
-
-func (e *savedPlanIdentityMismatchError) Error() string {
-	return "saved plan identity does not match workspace: " + e.reason
-}
 
 func isNil(arg any) bool {
 	if v := reflect.ValueOf(arg); !v.IsValid() || ((v.Kind() == reflect.Ptr ||
@@ -138,9 +116,8 @@ func (TypedAnnotationChangedPredicate[object]) Update(e event.TypedUpdateEvent[o
 // WorkspaceReconciler reconciles a Workspace object
 type WorkspaceReconciler struct {
 	client.Client
-	APIReader client.Reader
-	Scheme    *runtime.Scheme
-	Recorder  record.EventRecorder
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 
 	Tf       *runner.Exec
 	Renderer render.Renderer
@@ -218,20 +195,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	renderedGeneration := ws.Generation
 	if res, err, ret = r.handleRendering(ctx, ws); ret {
 		if err != nil {
 			err = fmt.Errorf("handleRendering: %w", err)
 			r.backoff(ctx, ws)
 		}
 
-		return res, err
-	}
-
-	if res, err, ret = r.ensureRenderedWorkspaceGeneration(ctx, ws, renderedGeneration); ret {
-		if err != nil {
-			err = fmt.Errorf("ensureRenderedWorkspaceGeneration: %w", err)
-		}
 		return res, err
 	}
 
@@ -253,7 +222,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	if res, err, ret = r.handlePlan(ctx, ws, tool, renderedGeneration); ret {
+	if res, err, ret = r.handlePlan(ctx, ws, tool); ret {
 		if err != nil {
 			err = fmt.Errorf("handlePlan: %w", err)
 			r.backoff(ctx, ws)
@@ -403,17 +372,23 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	}
 
 	if ws.ManualApplyRequested() && hasPlan {
-		err = r.validateSavedPlan(ctx, ws, sum, false)
-		if err != nil {
-			var mismatchErr *savedPlanIdentityMismatchError
-			if !errors.As(err, &mismatchErr) {
-				_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to validate saved plan for manual apply: %v", err), nil)
-				return ctrl.Result{}, fmt.Errorf("failed to validate saved plan for manual apply: %w", err), true
-			}
-
-			log.Info("manual apply request references an outdated plan, creating a new plan", "reason", mismatchErr.reason)
-			if err := r.invalidateManualApply(ctx, ws, sum); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to invalidate manual apply request: %w", err), true
+		_, statErr := os.Stat(filepath.Join(r.Tf.GetWorkspacePath(ws), planOutputPath))
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return ctrl.Result{}, fmt.Errorf("failed to check saved plan: %w", statErr), true
+		}
+		if os.IsNotExist(statErr) {
+			log.Info("manual apply requested but saved plan is missing, creating a new plan")
+			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+					return err
+				}
+				old := ws.DeepCopy()
+				ws.Status.NewPlanNeeded = true
+				ws.Status.NewApplyNeeded = false
+				return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+			})
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to request new plan: %w", err), true
 			}
 			return ctrl.Result{}, nil, false
 		}
@@ -436,14 +411,6 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 			return ctrl.Result{}, err, true
 		}
 
-		return ctrl.Result{}, nil, false
-	}
-
-	if ws.ManualApplyRequested() && !hasPlan {
-		log.Info("manual apply request has no current plan, creating a new plan")
-		if err := r.invalidateManualApply(ctx, ws, sum); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to invalidate manual apply request: %w", err), true
-		}
 		return ctrl.Result{}, nil, false
 	}
 
@@ -470,7 +437,7 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool, renderedGeneration int64) (ctrl.Result, error, bool) {
+func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
 	// Don't plan deleted workspaces
@@ -479,8 +446,14 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 	}
 
 	if ws.ManualApplyRequested() && ws.Status.CurrentPlan != nil {
-		log.V(DebugLevel).Info("manual apply requested, proceeding with existing plan")
-		return ctrl.Result{}, nil, false
+		_, statErr := os.Stat(filepath.Join(r.Tf.GetWorkspacePath(ws), planOutputPath))
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return ctrl.Result{}, fmt.Errorf("failed to check saved plan: %w", statErr), true
+		}
+		if !os.IsNotExist(statErr) {
+			log.V(DebugLevel).Info("manual apply requested, proceeding with existing plan")
+			return ctrl.Result{}, nil, false
+		}
 	}
 
 	if !ws.Status.NewPlanNeeded {
@@ -497,13 +470,8 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		return ctrl.Result{}, nil, false
 	}
 
-	if res, err, ret := r.ensureRenderedWorkspaceGeneration(ctx, ws, renderedGeneration); ret {
-		return res, err, true
-	}
-
 	log.V(DebugLevel).Info("handle plan starting")
 	defer log.V(DebugLevel).Info("handle plan completed")
-	plannedGeneration := renderedGeneration
 
 	_ = r.updateWorkspaceStatus(ctx, ws, TFPhasePlanning, fmt.Sprintf("Starting %s plan", tool.Name()), nil)
 
@@ -526,15 +494,6 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		return ctrl.Result{}, err, true
 	}
 
-	latest := &tfv1alphav1.Workspace{}
-	if err := r.getLatestWorkspace(ctx, ws, latest); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to get workspace after planning: %w", err), true
-	}
-	if latest.Generation != plannedGeneration {
-		log.Info("workspace changed while planning, discarding saved plan", "plannedGeneration", plannedGeneration, "currentGeneration", latest.Generation)
-		return ctrl.Result{Requeue: true}, nil, true
-	}
-
 	if !changed {
 		log.Info("plan has no changes, marking as completed", "workspace", ws.Name)
 		now := metav1.Now()
@@ -549,13 +508,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		}
 	}
 
-	identity, err := r.newSavedPlanIdentity(ws)
-	if err != nil {
-		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to calculate saved plan identity: %v", err), nil)
-		return ctrl.Result{}, fmt.Errorf("failed to calculate saved plan identity: %w", err), true
-	}
-
-	plan, err := r.createPlanRecord(ctx, ws, changed, planOutput, "", tfv1alphav1.PlanPhasePlanned, false, &identity)
+	plan, err := r.createPlanRecord(ctx, ws, changed, planOutput, "", tfv1alphav1.PlanPhasePlanned, false)
 	if err != nil {
 		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to create plan record: %v", err)
 		return ctrl.Result{}, fmt.Errorf("failed to create plan record: %w", err), true
@@ -563,7 +516,6 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 
 	err = r.updateWorkspaceStatus(ctx, ws, TFPhaseCompleted, "Plan completed", func(s *tfv1alphav1.WorkspaceStatus) {
 		s.HasChanges = changed
-		s.CurrentContentHash = identity.contentHash
 		s.NewPlanNeeded = false
 		s.NewApplyNeeded = true
 		s.CurrentPlan = &tfv1alphav1.PlanReference{
@@ -596,15 +548,6 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 	log.V(DebugLevel).Info("handle apply starting")
 	defer log.V(DebugLevel).Info("handle apply completed")
 
-	latest := &tfv1alphav1.Workspace{}
-	if err := r.getLatestWorkspace(ctx, ws, latest); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to get workspace before apply: %w", err), true
-	}
-	if latest.Generation != ws.Generation {
-		log.Info("workspace changed before apply, discarding saved plan", "plannedGeneration", ws.Generation, "currentGeneration", latest.Generation)
-		return ctrl.Result{Requeue: true}, nil, true
-	}
-	ws = latest
 	if !ws.Spec.AutoApply && !ws.ManualApplyRequested() {
 		now := metav1.Now()
 		r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "Auto-apply is disabled, skipping apply")
@@ -621,16 +564,24 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 	}
 
 	if ws.Status.HasChanges {
-		contentHash, err := r.Tf.CalculateChecksum(ws)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to calculate dependency hash before apply: %w", err), true
+		if _, err := os.Stat(filepath.Join(r.Tf.GetWorkspacePath(ws), planOutputPath)); err != nil {
+			if !os.IsNotExist(err) {
+				return ctrl.Result{}, fmt.Errorf("failed to check saved plan: %w", err), true
+			}
+			log.Info("saved plan is missing, requesting a new plan")
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+					return err
+				}
+				old := ws.DeepCopy()
+				ws.Status.NewPlanNeeded = true
+				ws.Status.NewApplyNeeded = false
+				return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+			}); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to request new plan: %w", err), true
+			}
+			return ctrl.Result{Requeue: true}, nil, true
 		}
-		if err := r.validateSavedPlan(ctx, ws, contentHash, true); err != nil {
-			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFApplyEventReason, "Failed to validate saved %s plan: %v", tool.Name(), err)
-			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to validate saved %s plan: %v", tool.Name(), err), nil)
-			return ctrl.Result{}, fmt.Errorf("failed to validate saved plan before apply: %w", err), true
-		}
-
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseApplying, fmt.Sprintf("Applying %s changes", tool.Name()), nil)
 
 		applyOutputCh, wg := r.streamOutput(ctx, ws, func(ws *tfv1alphav1.Workspace, output string) {
@@ -655,7 +606,7 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 			return ctrl.Result{}, err, true
 		}
 
-		_, err = r.createPlanRecord(ctx, ws, ws.Status.HasChanges, ws.Status.LastPlanOutput, applyOutput, tfv1alphav1.PlanPhaseApplied, false, nil)
+		_, err = r.createPlanRecord(ctx, ws, ws.Status.HasChanges, ws.Status.LastPlanOutput, applyOutput, tfv1alphav1.PlanPhaseApplied, false)
 		if err != nil {
 			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to create plan record after apply: %v", err)
 			return ctrl.Result{}, fmt.Errorf("failed to create plan record after failed apply: %w", err), true
@@ -689,26 +640,6 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status after apply: %w", err), true
 	}
 
-	return ctrl.Result{}, nil, false
-}
-
-func (r *WorkspaceReconciler) getLatestWorkspace(ctx context.Context, ws *tfv1alphav1.Workspace, latest *tfv1alphav1.Workspace) error {
-	reader := client.Reader(r.Client)
-	if r.APIReader != nil {
-		reader = r.APIReader
-	}
-	return reader.Get(ctx, client.ObjectKeyFromObject(ws), latest)
-}
-
-func (r *WorkspaceReconciler) ensureRenderedWorkspaceGeneration(ctx context.Context, ws *tfv1alphav1.Workspace, renderedGeneration int64) (ctrl.Result, error, bool) {
-	latest := &tfv1alphav1.Workspace{}
-	if err := r.getLatestWorkspace(ctx, ws, latest); err != nil {
-		return ctrl.Result{}, fmt.Errorf("get workspace after rendering: %w", err), true
-	}
-	if latest.Generation != renderedGeneration {
-		logf.FromContext(ctx).Info("workspace changed after rendering, discarding rendered configuration", "renderedGeneration", renderedGeneration, "currentGeneration", latest.Generation)
-		return ctrl.Result{Requeue: true}, nil, true
-	}
 	return ctrl.Result{}, nil, false
 }
 
@@ -912,14 +843,14 @@ func (r *WorkspaceReconciler) executeTerraformPlan(ctx context.Context, tool run
 	var err error
 
 	runner.WithOutputStream(ctx, tool, func() {
-		changed, err = tool.Plan(ctx, runner.WithDestroy(destroy), runner.WithOut(planOutputPath))
+		changed, err = tool.Plan(ctx, runner.WithDestroy(destroy), runner.WithOut("plan.out"))
 	}, cb)
 
 	if err != nil {
 		return false, "", fmt.Errorf("failed to plan %s: %w", tool.Name(), err)
 	}
 
-	planOutput, err := tool.ShowPlanFileRaw(ctx, planOutputPath)
+	planOutput, err := tool.ShowPlanFileRaw(ctx, "plan.out")
 	if err != nil {
 		return false, "", fmt.Errorf("failed to show plan file: %w", err)
 	}
@@ -1012,9 +943,8 @@ func (r *WorkspaceReconciler) updateWorkspaceStatus(ctx context.Context, ws *tfv
 	return err
 }
 
-// createPlanRecord creates or updates a Plan CRD as an audit record after terraform execution.
-// Identity is updated only when recording a newly generated plan, never while recording apply.
-func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alphav1.Workspace, hasChanges bool, planOutput, applyOutput string, phase tfv1alphav1.PlanPhase, destroy bool, identity *savedPlanIdentity) (*tfv1alphav1.Plan, error) {
+// createPlanRecord creates or updates a Plan CRD as an audit record after terraform execution
+func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alphav1.Workspace, hasChanges bool, planOutput, applyOutput string, phase tfv1alphav1.PlanPhase, destroy bool) (*tfv1alphav1.Plan, error) {
 	planName := fmt.Sprintf("%s-%d", ws.Name, ws.Generation)
 
 	var message string
@@ -1041,7 +971,6 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alph
 			Labels: map[string]string{
 				tfv1alphav1.WorkspacePlanLabel: ws.Name,
 			},
-			Annotations: savedPlanAnnotations(identity),
 		},
 		Spec: tfv1alphav1.PlanSpec{
 			WorkspaceRef: tfv1alphav1.WorkspaceReference{
@@ -1085,15 +1014,6 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alph
 		return nil, fmt.Errorf("plan not found after creation: %w", waitErr)
 	}
 
-	if phase == tfv1alphav1.PlanPhasePlanned {
-		if identity == nil {
-			return nil, fmt.Errorf("saved plan identity is required when recording a plan")
-		}
-		if err := r.updateSavedPlanIdentity(ctx, plan, *identity); err != nil {
-			return nil, err
-		}
-	}
-
 	// The plan status must be updated in a separate call
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(plan), plan); err != nil {
@@ -1122,142 +1042,6 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alph
 		return nil, fmt.Errorf("failed to update plan status: %w", err)
 	}
 	return plan, nil
-}
-
-func savedPlanAnnotations(identity *savedPlanIdentity) map[string]string {
-	if identity == nil {
-		return nil
-	}
-
-	return map[string]string{
-		planWorkspaceGenerationAnnotation: strconv.FormatInt(identity.workspaceGeneration, 10),
-		planContentHashAnnotation:         identity.contentHash,
-		planDigestAnnotation:              identity.digest,
-	}
-}
-
-func (r *WorkspaceReconciler) updateSavedPlanIdentity(ctx context.Context, plan *tfv1alphav1.Plan, identity savedPlanIdentity) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(plan), plan); err != nil {
-			return err
-		}
-
-		old := plan.DeepCopy()
-		if plan.Annotations == nil {
-			plan.Annotations = make(map[string]string)
-		}
-		for key, value := range savedPlanAnnotations(&identity) {
-			plan.Annotations[key] = value
-		}
-		return r.Client.Patch(ctx, plan, client.MergeFrom(old))
-	})
-}
-
-func (r *WorkspaceReconciler) newSavedPlanIdentity(ws *tfv1alphav1.Workspace) (savedPlanIdentity, error) {
-	contentHash, err := r.Tf.CalculateChecksum(ws)
-	if err != nil {
-		return savedPlanIdentity{}, fmt.Errorf("calculate dependency checksum: %w", err)
-	}
-
-	digest, err := r.savedPlanDigest(ws)
-	if err != nil {
-		return savedPlanIdentity{}, err
-	}
-
-	return savedPlanIdentity{
-		workspaceGeneration: ws.Generation,
-		contentHash:         contentHash,
-		digest:              digest,
-	}, nil
-}
-
-func (r *WorkspaceReconciler) savedPlanDigest(ws *tfv1alphav1.Workspace) (string, error) {
-	path := filepath.Join(r.Tf.GetWorkspacePath(ws), planOutputPath)
-	f, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("open saved plan %s: %w", path, err)
-	}
-	defer f.Close()
-
-	hash := sha256.New()
-	if _, err := io.Copy(hash, f); err != nil {
-		return "", fmt.Errorf("hash saved plan %s: %w", path, err)
-	}
-
-	return fmt.Sprintf("%x", hash.Sum(nil)), nil
-}
-
-func (r *WorkspaceReconciler) validateSavedPlan(ctx context.Context, ws *tfv1alphav1.Workspace, contentHash string, checkArtifact bool) error {
-	if ws.Status.CurrentPlan == nil {
-		return &savedPlanIdentityMismatchError{reason: "workspace has no current plan"}
-	}
-
-	planNamespace := ws.Status.CurrentPlan.Namespace
-	if planNamespace == "" {
-		planNamespace = ws.Namespace
-	}
-	plan := &tfv1alphav1.Plan{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: planNamespace, Name: ws.Status.CurrentPlan.Name}, plan); err != nil {
-		return fmt.Errorf("get current plan: %w", err)
-	}
-
-	if plan.Spec.WorkspaceRef.Name != ws.Name || plan.Spec.WorkspaceRef.Namespace != ws.Namespace || !metav1.IsControlledBy(plan, ws) {
-		return &savedPlanIdentityMismatchError{reason: "current plan does not belong to workspace"}
-	}
-	if plan.Status.Phase != tfv1alphav1.PlanPhasePlanned {
-		return &savedPlanIdentityMismatchError{reason: fmt.Sprintf("current plan is %s", plan.Status.Phase)}
-	}
-	if plan.Spec.Render != ws.Status.CurrentRender {
-		return &savedPlanIdentityMismatchError{reason: "rendered configuration changed"}
-	}
-	if plan.Spec.Tool != ws.Spec.Tool || plan.Spec.ToolVersion != ws.Spec.ToolVersion || plan.Spec.TerraformVersion != ws.Spec.TerraformVersion {
-		return &savedPlanIdentityMismatchError{reason: "IaC tool configuration changed"}
-	}
-
-	annotations := plan.GetAnnotations()
-	if annotations[planWorkspaceGenerationAnnotation] != strconv.FormatInt(ws.Generation, 10) {
-		return &savedPlanIdentityMismatchError{reason: "workspace generation changed"}
-	}
-	if annotations[planContentHashAnnotation] != contentHash {
-		return &savedPlanIdentityMismatchError{reason: "dependency content changed"}
-	}
-	if annotations[planDigestAnnotation] == "" {
-		return &savedPlanIdentityMismatchError{reason: "saved plan digest is missing"}
-	}
-
-	if !checkArtifact {
-		return nil
-	}
-
-	digest, err := r.savedPlanDigest(ws)
-	if err != nil {
-		return err
-	}
-	if digest != annotations[planDigestAnnotation] {
-		return &savedPlanIdentityMismatchError{reason: "saved plan artifact changed"}
-	}
-
-	return nil
-}
-
-func (r *WorkspaceReconciler) invalidateManualApply(ctx context.Context, ws *tfv1alphav1.Workspace, contentHash string) error {
-	old := ws.DeepCopy()
-	delete(ws.Annotations, tfv1alphav1.ManualApplyAnnotation)
-	if err := r.Client.Patch(ctx, ws, client.MergeFrom(old)); err != nil {
-		return err
-	}
-
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
-			return err
-		}
-
-		old := ws.DeepCopy()
-		ws.Status.CurrentContentHash = contentHash
-		ws.Status.NewPlanNeeded = true
-		ws.Status.NewApplyNeeded = false
-		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
-	})
 }
 
 // getEnvsForExecution gets environment variables for terraform execution

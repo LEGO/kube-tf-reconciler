@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"
@@ -92,10 +91,9 @@ func TestWorkspaceController(t *testing.T) {
 	rootDir := t.TempDir() // testutils.TestDataFolder() // Enable to better introspection into test data
 	t.Logf("using root dir: %s", rootDir)
 	err = (&WorkspaceReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Scheme:    mgr.GetScheme(),
-		Recorder:  mgr.GetEventRecorderFor("krec"),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("krec"),
 
 		Tf:       runner.New(rootDir),
 		Renderer: render.NewFileRender(rootDir),
@@ -188,48 +186,6 @@ func TestWorkspaceController(t *testing.T) {
 		assert.Contains(t, reasons, TFApplyEventReason)
 		assert.Contains(t, reasons, TFPlanEventReason)
 		assert.Contains(t, reasons, TFValidateEventReason)
-	})
-
-	t.Run("manual apply request is invalidated after workspace change", func(t *testing.T) {
-		t.Parallel()
-		ws := newWs("test-resource-manual-apply-invalidated", modHost.ModuleSource("my-module"))
-		ws.Spec.Destroy = tfv1alphav1.DestroyBehaviourAuto
-		ws.Spec.AutoApply = false
-		assert.NoError(t, k.Resources().Create(ctx, ws))
-
-		err := wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
-		assert.NoError(t, err)
-		assert.Equal(t, int64(1), ws.Generation)
-
-		ws.Spec.Module.Inputs = testutils.Json(map[string]interface{}{
-			"pet_name_length": 3,
-		})
-		ws.Annotations = map[string]string{
-			tfv1alphav1.ManualApplyAnnotation: "true",
-		}
-		assert.NoError(t, k.Resources().Update(ctx, ws))
-
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
-			w := object.(*tfv1alphav1.Workspace)
-			_, manualRequested := w.Annotations[tfv1alphav1.ManualApplyAnnotation]
-			return w.Generation == 2 &&
-				w.Status.ObservedGeneration == 2 &&
-				!manualRequested &&
-				w.Status.CurrentPlan != nil &&
-				w.Status.CurrentPlan.Name == fmt.Sprintf("%s-2", w.Name)
-		}), wait.WithContext(ctx))
-		assert.NoError(t, err)
-
-		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 2, plansForWs(ws)), wait.WithContext(ctx))
-		assert.NoError(t, err)
-		require.Len(t, plans.Items, 2)
-		for _, plan := range plans.Items {
-			if plan.Name == fmt.Sprintf("%s-2", ws.Name) {
-				assert.Equal(t, tfv1alphav1.PlanPhasePlanned, plan.Status.Phase)
-				assert.Empty(t, plan.Status.ApplyOutput)
-			}
-		}
 	})
 
 	t.Run("authenticate with generic token", func(t *testing.T) {
@@ -632,322 +588,123 @@ func TestHandleManualRetry(t *testing.T) {
 	})
 }
 
-func TestExecuteTerraformApplyUsesSavedPlan(t *testing.T) {
-	t.Run("passes the saved plan to apply", func(t *testing.T) {
-		tool := &recordingIaCTool{}
-		r := &WorkspaceReconciler{}
-
-		_, err := r.executeTerraformApply(t.Context(), tool, false, func(string, string) {})
-		require.NoError(t, err)
-		assert.Equal(t, 1, tool.applyCalls)
-		assert.Equal(t, planOutputPath, tool.applyPlanPath)
-	})
-
-	t.Run("returns missing saved plan error without a fallback apply", func(t *testing.T) {
-		tool := &recordingIaCTool{applyErr: os.ErrNotExist}
-		r := &WorkspaceReconciler{}
-
-		_, err := r.executeTerraformApply(t.Context(), tool, false, func(string, string) {})
-		require.ErrorIs(t, err, os.ErrNotExist)
-		assert.Equal(t, 1, tool.applyCalls)
-		assert.Equal(t, planOutputPath, tool.applyPlanPath)
-	})
-}
-
-func TestSavedPlanValidation(t *testing.T) {
+func TestMissingSavedPlanIsReplannedBeforeManualApply(t *testing.T) {
 	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
 	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
 
-	ws := &tfv1alphav1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "workspace", Namespace: "default", UID: "workspace-uid", Generation: 1},
-		Status: tfv1alphav1.WorkspaceStatus{
-			CurrentRender: "rendered configuration",
-			CurrentPlan:   &tfv1alphav1.PlanReference{Name: "workspace-1", Namespace: "default"},
-		},
+	ws := newWs("missing-plan", "some-source")
+	ws.Generation = 1
+	ws.Spec.AutoApply = false
+	ws.Annotations = map[string]string{tfv1alphav1.ManualApplyAnnotation: "true"}
+	ws.Status = tfv1alphav1.WorkspaceStatus{
+		CurrentPlan:    &tfv1alphav1.PlanReference{Name: "missing-plan-1", Namespace: ws.Namespace},
+		HasChanges:     true,
+		NewPlanNeeded:  false,
+		NewApplyNeeded: false,
 	}
-	rootDir := t.TempDir()
-	r := &WorkspaceReconciler{Tf: runner.New(rootDir), Scheme: scheme}
-	require.NoError(t, r.Tf.SetupWorkspace(ws))
-	planPath := filepath.Join(r.Tf.GetWorkspacePath(ws), planOutputPath)
-	require.NoError(t, os.WriteFile(planPath, []byte("saved plan"), 0600))
-	digest, err := r.savedPlanDigest(ws)
-	require.NoError(t, err)
 
 	plan := &tfv1alphav1.Plan{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "workspace-1",
-			Namespace:   "default",
-			Annotations: savedPlanAnnotations(&savedPlanIdentity{workspaceGeneration: 1, contentHash: "content-hash", digest: digest}),
-		},
-		Spec: tfv1alphav1.PlanSpec{
-			WorkspaceRef: tfv1alphav1.WorkspaceReference{Name: ws.Name, Namespace: ws.Namespace},
-			Render:       ws.Status.CurrentRender,
-		},
-		Status: tfv1alphav1.PlanStatus{Phase: tfv1alphav1.PlanPhasePlanned},
+		ObjectMeta: metav1.ObjectMeta{Name: "missing-plan-1", Namespace: ws.Namespace},
+		Spec:       tfv1alphav1.PlanSpec{WorkspaceRef: tfv1alphav1.WorkspaceReference{Name: ws.Name, Namespace: ws.Namespace}},
 	}
-	require.NoError(t, controllerutil.SetControllerReference(ws, plan, scheme))
-	r.Client = clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(ws, plan).Build()
+	rootDir := t.TempDir()
+	exec := runner.New(rootDir)
+	require.NoError(t, exec.SetupWorkspace(ws))
+	require.NoError(t, os.Mkdir(filepath.Join(exec.GetWorkspacePath(ws), ".terraform"), 0755))
+	planPath := filepath.Join(exec.GetWorkspacePath(ws), planOutputPath)
+	require.NoError(t, os.WriteFile(planPath, []byte("old plan"), 0600))
+	require.NoError(t, os.Remove(planPath))
 
-	require.NoError(t, r.validateSavedPlan(t.Context(), ws, "content-hash", true))
+	fakeClient := clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(ws, plan).
+		WithObjects(ws, plan).
+		Build()
+	tool := &replanningIaCTool{workspacePath: exec.GetWorkspacePath(ws), changed: true}
+	r := &WorkspaceReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+		Tf:       exec,
+	}
 
-	ws.Status.CurrentRender = "changed configuration"
-	assert.ErrorAs(t, r.validateSavedPlan(t.Context(), ws, "content-hash", false), new(*savedPlanIdentityMismatchError))
-	ws.Status.CurrentRender = plan.Spec.Render
+	result, err, ret := r.handleRefreshDependencies(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.False(t, ret)
+	assert.False(t, result.Requeue)
+	assert.True(t, ws.Status.NewPlanNeeded)
+	assert.False(t, ws.Status.NewApplyNeeded)
+	assert.Zero(t, ws.Status.Backoff.RetryCount)
 
-	assert.ErrorAs(t, r.validateSavedPlan(t.Context(), ws, "changed-content-hash", false), new(*savedPlanIdentityMismatchError))
-
-	require.NoError(t, os.WriteFile(planPath, []byte("modified saved plan"), 0600))
-	assert.ErrorAs(t, r.validateSavedPlan(t.Context(), ws, "content-hash", true), new(*savedPlanIdentityMismatchError))
+	result, err, ret = r.handlePlan(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.False(t, ret)
+	assert.False(t, result.Requeue)
+	assert.Equal(t, 1, tool.planCalls)
 
 	require.NoError(t, os.Remove(planPath))
-	assert.ErrorIs(t, r.validateSavedPlan(t.Context(), ws, "content-hash", true), os.ErrNotExist)
-
-	plan.Status.Phase = tfv1alphav1.PlanPhaseApplied
-	require.NoError(t, r.Client.Update(t.Context(), plan))
-	assert.ErrorAs(t, r.validateSavedPlan(t.Context(), ws, "content-hash", false), new(*savedPlanIdentityMismatchError))
-}
-
-func TestCreatePlanRecordRefreshesSavedPlanIdentityOnlyWhenPlanned(t *testing.T) {
-	scheme := runtime.NewScheme()
-	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
-
-	ws := &tfv1alphav1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "workspace", Namespace: "default", UID: "workspace-uid", Generation: 1},
-		Status:     tfv1alphav1.WorkspaceStatus{CurrentRender: "rendered configuration"},
-	}
-	r := &WorkspaceReconciler{
-		Client: clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&tfv1alphav1.Plan{}).WithObjects(ws).Build(),
-		Scheme: scheme,
-	}
-
-	first := savedPlanIdentity{workspaceGeneration: 1, contentHash: "first-content", digest: "first-digest"}
-	plan, err := r.createPlanRecord(t.Context(), ws, true, "first plan", "", tfv1alphav1.PlanPhasePlanned, false, &first)
-	require.NoError(t, err)
-
-	second := savedPlanIdentity{workspaceGeneration: 1, contentHash: "second-content", digest: "second-digest"}
-	_, err = r.createPlanRecord(t.Context(), ws, true, "second plan", "", tfv1alphav1.PlanPhasePlanned, false, &second)
-	require.NoError(t, err)
-
-	var got tfv1alphav1.Plan
-	require.NoError(t, r.Client.Get(t.Context(), client.ObjectKeyFromObject(plan), &got))
-	assert.Equal(t, "second-content", got.Annotations[planContentHashAnnotation])
-	assert.Equal(t, "second-digest", got.Annotations[planDigestAnnotation])
-
-	_, err = r.createPlanRecord(t.Context(), ws, true, "second plan", "apply output", tfv1alphav1.PlanPhaseApplied, false, nil)
-	require.NoError(t, err)
-	require.NoError(t, r.Client.Get(t.Context(), client.ObjectKeyFromObject(plan), &got))
-	assert.Equal(t, "second-content", got.Annotations[planContentHashAnnotation])
-	assert.Equal(t, "second-digest", got.Annotations[planDigestAnnotation])
-}
-
-func TestInvalidateManualApplyRequiresNewApproval(t *testing.T) {
-	scheme := runtime.NewScheme()
-	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
-
-	ws := &tfv1alphav1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "workspace",
-			Namespace:   "default",
-			Annotations: map[string]string{tfv1alphav1.ManualApplyAnnotation: "true"},
-		},
-		Status: tfv1alphav1.WorkspaceStatus{ObservedGeneration: 1},
-	}
-	r := &WorkspaceReconciler{
-		Client: clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(ws).WithObjects(ws).Build(),
-	}
-
-	require.NoError(t, r.invalidateManualApply(t.Context(), ws, "new-content-hash"))
-
-	var got tfv1alphav1.Workspace
-	require.NoError(t, r.Client.Get(t.Context(), client.ObjectKeyFromObject(ws), &got))
-	assert.NotContains(t, got.Annotations, tfv1alphav1.ManualApplyAnnotation)
-	assert.True(t, got.Status.NewPlanNeeded)
-	assert.False(t, got.Status.NewApplyNeeded)
-	assert.Equal(t, int64(1), got.Status.ObservedGeneration)
-}
-
-func TestHandleApplyValidatesSavedPlanArtifact(t *testing.T) {
-	newSetup := func(t *testing.T, artifact []byte) (*WorkspaceReconciler, *tfv1alphav1.Workspace, *recordingIaCTool) {
-		t.Helper()
-		scheme := runtime.NewScheme()
-		require.NoError(t, tfv1alphav1.AddToScheme(scheme))
-
-		ws := &tfv1alphav1.Workspace{
-			ObjectMeta: metav1.ObjectMeta{Name: "workspace", Namespace: "default", UID: "workspace-uid", Generation: 1},
-			Spec:       tfv1alphav1.WorkspaceSpec{AutoApply: true},
-			Status: tfv1alphav1.WorkspaceStatus{
-				CurrentRender:      "rendered configuration",
-				CurrentPlan:        &tfv1alphav1.PlanReference{Name: "workspace-1", Namespace: "default"},
-				HasChanges:         true,
-				NewApplyNeeded:     true,
-				ObservedGeneration: 0,
-			},
-		}
-		rootDir := t.TempDir()
-		exec := runner.New(rootDir)
-		require.NoError(t, exec.SetupWorkspace(ws))
-		dependencyPath := filepath.Join(exec.GetWorkspacePath(ws), ".terraform", "dependency")
-		require.NoError(t, os.MkdirAll(filepath.Dir(dependencyPath), 0755))
-		require.NoError(t, os.WriteFile(dependencyPath, []byte("dependency"), 0600))
-		contentHash, err := exec.CalculateChecksum(ws)
-		require.NoError(t, err)
-
-		var digest string
-		if artifact != nil {
-			require.NoError(t, os.WriteFile(filepath.Join(exec.GetWorkspacePath(ws), planOutputPath), artifact, 0600))
-			hash := sha256.Sum256(artifact)
-			digest = fmt.Sprintf("%x", hash[:])
-		} else {
-			digest = "missing-artifact-digest"
-		}
-		plan := &tfv1alphav1.Plan{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        "workspace-1",
-				Namespace:   "default",
-				Annotations: savedPlanAnnotations(&savedPlanIdentity{workspaceGeneration: 1, contentHash: contentHash, digest: digest}),
-			},
-			Spec: tfv1alphav1.PlanSpec{
-				WorkspaceRef: tfv1alphav1.WorkspaceReference{Name: ws.Name, Namespace: ws.Namespace},
-				Render:       ws.Status.CurrentRender,
-			},
-			Status: tfv1alphav1.PlanStatus{Phase: tfv1alphav1.PlanPhasePlanned},
-		}
-		require.NoError(t, controllerutil.SetControllerReference(ws, plan, scheme))
-		r := &WorkspaceReconciler{
-			Client:   clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(ws, plan).WithObjects(ws, plan).Build(),
-			Scheme:   scheme,
-			Recorder: record.NewFakeRecorder(16),
-			Tf:       exec,
-		}
-		return r, ws, &recordingIaCTool{}
-	}
-
-	t.Run("applies a matching saved plan", func(t *testing.T) {
-		r, ws, tool := newSetup(t, []byte("saved plan"))
-
-		_, err, ret := r.handleApply(t.Context(), ws, tool)
-		require.NoError(t, err)
-		assert.False(t, ret)
-		assert.Equal(t, 1, tool.applyCalls)
-		assert.Equal(t, planOutputPath, tool.applyPlanPath)
-	})
-
-	t.Run("applies a matching manually approved saved plan", func(t *testing.T) {
-		r, ws, tool := newSetup(t, []byte("saved plan"))
-		ws.Spec.AutoApply = false
-		ws.Annotations = map[string]string{tfv1alphav1.ManualApplyAnnotation: "true"}
-		require.NoError(t, r.Client.Update(t.Context(), ws))
-
-		_, err, ret := r.handleApply(t.Context(), ws, tool)
-		require.NoError(t, err)
-		assert.False(t, ret)
-		assert.Equal(t, 1, tool.applyCalls)
-	})
-
-	t.Run("rejects a missing saved plan before apply", func(t *testing.T) {
-		r, ws, tool := newSetup(t, nil)
-
-		_, err, ret := r.handleApply(t.Context(), ws, tool)
-		require.ErrorIs(t, err, os.ErrNotExist)
-		assert.True(t, ret)
-		assert.Zero(t, tool.applyCalls)
-
-		var got tfv1alphav1.Workspace
-		require.NoError(t, r.Client.Get(t.Context(), client.ObjectKeyFromObject(ws), &got))
-		assert.Equal(t, int64(0), got.Status.ObservedGeneration)
-	})
-
-	t.Run("requeues when the API server has a newer workspace generation", func(t *testing.T) {
-		r, ws, tool := newSetup(t, []byte("saved plan"))
-		latest := ws.DeepCopy()
-		latest.Generation++
-		r.APIReader = clientfake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(latest).Build()
-
-		result, err, ret := r.handleApply(t.Context(), ws, tool)
-		require.NoError(t, err)
-		assert.True(t, ret)
-		assert.True(t, result.Requeue)
-		assert.Zero(t, tool.applyCalls)
-	})
-
-	t.Run("does not apply when manual approval was removed", func(t *testing.T) {
-		r, ws, tool := newSetup(t, []byte("saved plan"))
-		ws.Spec.AutoApply = false
-		ws.Annotations = map[string]string{tfv1alphav1.ManualApplyAnnotation: "true"}
-		require.NoError(t, r.Client.Update(t.Context(), ws))
-
-		latest := ws.DeepCopy()
-		delete(latest.Annotations, tfv1alphav1.ManualApplyAnnotation)
-		r.APIReader = clientfake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(latest).Build()
-
-		_, err, ret := r.handleApply(t.Context(), ws, tool)
-		require.NoError(t, err)
-		assert.False(t, ret)
-		assert.Zero(t, tool.applyCalls)
-	})
-}
-
-func TestHandlePlanRejectsStaleRenderedGeneration(t *testing.T) {
-	scheme := runtime.NewScheme()
-	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
-
-	ws := &tfv1alphav1.Workspace{
-		// The status update after rendering has refreshed this pointer to generation 2,
-		// while the files on disk were rendered from generation 1.
-		ObjectMeta: metav1.ObjectMeta{Name: "workspace", Namespace: "default", Generation: 2},
-		Status:     tfv1alphav1.WorkspaceStatus{NewPlanNeeded: true},
-	}
-	latest := ws.DeepCopy()
-	r := &WorkspaceReconciler{
-		Client:    clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(ws).WithObjects(ws).Build(),
-		APIReader: clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(latest).Build(),
-		Scheme:    scheme,
-		Recorder:  record.NewFakeRecorder(16),
-	}
-	tool := &recordingIaCTool{}
-
-	result, err, ret := r.handlePlan(t.Context(), ws, tool, 1)
+	result, err, ret = r.handleApply(t.Context(), ws, tool)
 	require.NoError(t, err)
 	assert.True(t, ret)
 	assert.True(t, result.Requeue)
-	assert.Zero(t, tool.planCalls)
+	assert.Equal(t, 0, tool.applyCalls)
+
+	result, err, ret = r.handlePlan(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.False(t, ret)
+	assert.False(t, result.Requeue)
+	assert.Equal(t, 2, tool.planCalls)
+
+	result, err, ret = r.handleApply(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.False(t, ret)
+	assert.False(t, result.Requeue)
+	assert.Equal(t, 1, tool.applyCalls)
+	assert.Equal(t, planOutputPath, tool.applyPlanPath)
+	assert.FileExists(t, planPath)
+
+	var got tfv1alphav1.Workspace
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(ws), &got))
+	assert.Equal(t, "true", got.Annotations[tfv1alphav1.ManualApplyAnnotation])
+	assert.Zero(t, got.Status.Backoff.RetryCount)
+	assert.Equal(t, TFPhaseCompleted, got.Status.TerraformPhase)
 }
 
-type recordingIaCTool struct {
+type replanningIaCTool struct {
+	workspacePath string
+	changed       bool
 	planCalls     int
 	applyCalls    int
 	applyPlanPath string
-	applyErr      error
-	stdout        io.Writer
-	stderr        io.Writer
 }
 
-func (t *recordingIaCTool) Name() string { return "recording" }
-
-func (t *recordingIaCTool) Init(context.Context, ...runner.InitOption) error { return nil }
-
-func (t *recordingIaCTool) Validate(context.Context) (*tfjson.ValidateOutput, error) { return nil, nil }
-
-func (t *recordingIaCTool) Plan(context.Context, ...runner.PlanOption) (bool, error) {
+func (t *replanningIaCTool) Name() string                                     { return "terraform" }
+func (t *replanningIaCTool) Init(context.Context, ...runner.InitOption) error { return nil }
+func (t *replanningIaCTool) Validate(context.Context) (*tfjson.ValidateOutput, error) {
+	return &tfjson.ValidateOutput{Valid: true}, nil
+}
+func (t *replanningIaCTool) Plan(_ context.Context, opts ...runner.PlanOption) (bool, error) {
 	t.planCalls++
-	return false, nil
+	options := runner.PlanOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	return t.changed, os.WriteFile(filepath.Join(t.workspacePath, options.Out), []byte("new plan"), 0600)
 }
-
-func (t *recordingIaCTool) ShowPlanFileRaw(context.Context, string) (string, error) { return "", nil }
-
-func (t *recordingIaCTool) Apply(_ context.Context, planPath string) error {
+func (t *replanningIaCTool) ShowPlanFileRaw(context.Context, string) (string, error) {
+	return "new plan", nil
+}
+func (t *replanningIaCTool) Apply(_ context.Context, planPath string) error {
 	t.applyCalls++
 	t.applyPlanPath = planPath
-	return t.applyErr
+	_, err := os.Stat(filepath.Join(t.workspacePath, planPath))
+	return err
 }
-
-func (t *recordingIaCTool) Destroy(context.Context) error { return nil }
-
-func (t *recordingIaCTool) SetEnv(map[string]string) error { return nil }
-
-func (t *recordingIaCTool) SetStdout(w io.Writer) { t.stdout = w }
-
-func (t *recordingIaCTool) SetStderr(w io.Writer) { t.stderr = w }
+func (t *replanningIaCTool) Destroy(context.Context) error  { return nil }
+func (t *replanningIaCTool) SetEnv(map[string]string) error { return nil }
+func (t *replanningIaCTool) SetStdout(io.Writer)            {}
+func (t *replanningIaCTool) SetStderr(io.Writer)            {}
 
 func plansForWs(ws *tfv1alphav1.Workspace) resources.ListOption {
 	return resources.WithLabelSelector(fmt.Sprintf("%s=%s", tfv1alphav1.WorkspacePlanLabel, ws.Name))
@@ -963,9 +720,9 @@ func newWs(name, moduleSource string) *tfv1alphav1.Workspace {
 			Backend: tfv1alphav1.BackendSpec{
 				Type: "local",
 			},
-			AutoApply:      true,
-			PreventDestroy: true,
-			ToolVersion:    "1.13.3",
+			AutoApply:        true,
+			PreventDestroy:   true,
+			ToolVersion:      "1.13.3",
 			ProviderSpecs: []tfv1alphav1.ProviderSpec{
 				{
 					Name:    "aws",

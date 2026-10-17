@@ -59,10 +59,9 @@ var operatorCmd = &cobra.Command{
 		}
 
 		reconciler := &controller.WorkspaceReconciler{
-			Client:    mgr.GetClient(),
-			APIReader: mgr.GetAPIReader(),
-			Scheme:    mgr.GetScheme(),
-			Recorder:  mgr.GetEventRecorderFor("krec"),
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorderFor("krec"),
 
 			Tf:       runner.New(cfg.WorkspacePath),
 			Renderer: render.NewFileRender(cfg.WorkspacePath),
