@@ -22,6 +22,6 @@ func DefaultConfig() Config {
 		Namespace:            "krec",
 		EnableLeaderElection: false,
 		WorkspacePath:        "./.testdata",
-		ForceInitInterval:    6 * time.Hour,
+		ForceInitInterval:    24 * time.Hour,
 	}
 }

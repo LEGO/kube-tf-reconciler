@@ -965,7 +965,15 @@ func TestSkipInitReconciliation(t *testing.T) {
 	ws.Spec.AutoApply = false
 	ws.Spec.ProviderSpecs = []tfv1alphav1.ProviderSpec{{Name: "random", Version: "3.7.2", Source: "hashicorp/random"}}
 
-	c := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(ws, &tfv1alphav1.Plan{}).WithObjects(ws).Build()
+	secret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: ws.Namespace},
+		Data:       map[string][]byte{"password": []byte("hunter2")},
+	}
+	ws.Spec.TFExec = &tfv1alphav1.TFSpec{Env: []tfv1alphav1.EnvVar{
+		{Name: "TEST_PASSWORD", SecretKeyRef: &tfv1alphav1.SecretKeySelector{Name: "creds", Key: "password"}},
+	}}
+
+	c := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(ws, &tfv1alphav1.Plan{}).WithObjects(ws, secret).Build()
 	rootDir := t.TempDir()
 	r := &WorkspaceReconciler{
 		Client:   c,
@@ -1018,6 +1026,20 @@ func TestSkipInitReconciliation(t *testing.T) {
 	assert.Contains(t, second.Status.InitOutput, "init skipped")
 	assert.Equal(t, first.Status.CurrentContentHash, second.Status.CurrentContentHash, "content hash is kept when init is skipped")
 	assert.Equal(t, 1, planOutputEvents(), "plan still runs when init is skipped, so out-of-band changes are detected")
+
+	var currentSecret v1.Secret
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(secret), &currentSecret))
+	currentSecret.Data["password"] = []byte("rotated")
+	require.NoError(t, c.Update(t.Context(), &currentSecret))
+	rotated := reconcileRefresh()
+	assert.Contains(t, rotated.Status.InitOutput, "Terraform has been successfully initialized", "rewriting a referenced secret forces a full init")
+	assert.Equal(t, 1, planOutputEvents())
+
+	_, err, ret, _, fingerprintEnvs := r.setupTerraformForWorkspace(t.Context(), get())
+	require.NoError(t, err)
+	require.False(t, ret)
+	assert.NotContains(t, fingerprintEnvs["TEST_PASSWORD"], "rotated")
+	assert.Contains(t, fingerprintEnvs["TEST_PASSWORD"], "creds/password")
 
 	cur := get()
 	cur.Spec.Module.Inputs = nil
@@ -1132,4 +1154,43 @@ func TestSkipInitAcrossPods(t *testing.T) {
 	require.NoError(t, os.RemoveAll(filepath.Join(podA.Tf.GetWorkspacePath(ws), ".terraform")))
 	got = refreshOn(podA)
 	assert.Contains(t, got.Status.InitOutput, fullInit, "pod A: modules missing locally")
+}
+
+func TestGetEnvsForExecutionSecretDescriptors(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
+
+	const secretValue = "super-secret-value"
+	secret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "default", UID: "uid-1"},
+		Data:       map[string][]byte{"password": []byte(secretValue)},
+	}
+	c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	r := &WorkspaceReconciler{Client: c, Scheme: scheme, Tf: runner.New(t.TempDir())}
+
+	ws := newWs("secret-envs", "some-source")
+	ws.Spec.TFExec = &tfv1alphav1.TFSpec{Env: []tfv1alphav1.EnvVar{
+		{Name: "PLAIN", Value: "plain-value"},
+		{Name: "PASSWORD", SecretKeyRef: &tfv1alphav1.SecretKeySelector{Name: "creds", Key: "password"}},
+	}}
+
+	envs, descriptors, err := r.getEnvsForExecution(t.Context(), ws)
+	require.NoError(t, err)
+	assert.Equal(t, secretValue, envs["PASSWORD"])
+	assert.Equal(t, "plain-value", envs["PLAIN"])
+	require.Contains(t, descriptors, "PASSWORD")
+	assert.NotContains(t, descriptors, "PLAIN")
+	assert.NotContains(t, descriptors["PASSWORD"], secretValue)
+	assert.Contains(t, descriptors["PASSWORD"], "creds/password")
+	assert.Contains(t, descriptors["PASSWORD"], "uid-1")
+
+	var current v1.Secret
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(secret), &current))
+	current.Data["password"] = []byte("rotated")
+	require.NoError(t, c.Update(t.Context(), &current))
+
+	_, rotated, err := r.getEnvsForExecution(t.Context(), ws)
+	require.NoError(t, err)
+	assert.NotEqual(t, descriptors["PASSWORD"], rotated["PASSWORD"], "descriptor must change when the secret is written")
 }

@@ -48,7 +48,7 @@ const (
 	defaultPlanHistoryLimit  = 3
 	planCreationTimeout      = 2 * time.Second
 	nextRefreshInterval      = 30 * time.Minute
-	defaultForceInitInterval = 6 * time.Hour
+	defaultForceInitInterval = 24 * time.Hour
 
 	TFErrEventReason      = "TerraformError"
 	TFPlanEventReason     = "TerraformPlan"
@@ -188,7 +188,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	res, err, ret, tool, envs := r.setupTerraformForWorkspace(ctx, ws)
+	res, err, ret, tool, fingerprintEnvs := r.setupTerraformForWorkspace(ctx, ws)
 	if ret {
 		if err != nil {
 			err = fmt.Errorf("setupTerraformForWorkspace: %w", err)
@@ -207,7 +207,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	if res, err, ret = r.handleRefreshDependencies(ctx, ws, tool, envs, forceInit); ret {
+	if res, err, ret = r.handleRefreshDependencies(ctx, ws, tool, fingerprintEnvs, forceInit); ret {
 		if err != nil {
 			err = fmt.Errorf("handleRefreshDependencies: %w", err)
 			r.backoff(ctx, ws)
@@ -284,13 +284,13 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfv1alpha
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool, envs map[string]string, forceInit bool) (ctrl.Result, error, bool) {
+func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool, fingerprintEnvs map[string]string, forceInit bool) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
 	log.V(DebugLevel).Info("refresh dependencies starting")
 	defer log.V(DebugLevel).Info("refresh dependencies completed")
 
-	skip, reason := r.initSkipDecision(ws, envs, forceInit)
+	skip, reason := r.initSkipDecision(ws, fingerprintEnvs, forceInit)
 	if skip {
 		log.Info("skipping init and validate, inputs unchanged and modules pinned", "workspace", ws.Name)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseInitializing, fmt.Sprintf("%s init skipped: %s", capitalize(tool.Name()), reason), func(s *tfv1alphav1.WorkspaceStatus) {
@@ -375,7 +375,7 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 		return ctrl.Result{}, fmt.Errorf("%s validation failed: %s", tool.Name(), diagnosticsMsg), true
 	}
 
-	r.recordSuccessfulInit(ctx, ws, envs)
+	r.recordSuccessfulInit(ctx, ws, fingerprintEnvs)
 
 	sum, err := r.Tf.CalculateChecksum(ws)
 	if err != nil {
@@ -387,7 +387,7 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	return r.decidePlanAfterInit(ctx, ws, sum)
 }
 
-func (r *WorkspaceReconciler) initSkipDecision(ws *tfv1alphav1.Workspace, envs map[string]string, forceInit bool) (bool, string) {
+func (r *WorkspaceReconciler) initSkipDecision(ws *tfv1alphav1.Workspace, fingerprintEnvs map[string]string, forceInit bool) (bool, string) {
 	switch {
 	case forceInit:
 		return false, "manual retry requested"
@@ -423,7 +423,7 @@ func (r *WorkspaceReconciler) initSkipDecision(ws *tfv1alphav1.Workspace, envs m
 		return false, "a nested module source is not pinned to an immutable revision"
 	}
 
-	fingerprint, err := r.Tf.InitFingerprint(ws, envs)
+	fingerprint, err := r.Tf.InitFingerprint(ws, fingerprintEnvs)
 	if err != nil {
 		return false, fmt.Sprintf("failed to calculate init fingerprint: %v", err)
 	}
@@ -438,10 +438,10 @@ func (r *WorkspaceReconciler) initSkipDecision(ws *tfv1alphav1.Workspace, envs m
 	return true, fmt.Sprintf("inputs unchanged since %s", marker.InitializedAt.UTC().Format(time.RFC3339))
 }
 
-func (r *WorkspaceReconciler) recordSuccessfulInit(ctx context.Context, ws *tfv1alphav1.Workspace, envs map[string]string) {
+func (r *WorkspaceReconciler) recordSuccessfulInit(ctx context.Context, ws *tfv1alphav1.Workspace, fingerprintEnvs map[string]string) {
 	log := logf.FromContext(ctx)
 
-	fingerprint, err := r.Tf.InitFingerprint(ws, envs)
+	fingerprint, err := r.Tf.InitFingerprint(ws, fingerprintEnvs)
 	if err != nil {
 		log.Error(err, "failed to calculate init fingerprint, init will not be skipped next time", "workspace", ws.Name)
 		return
@@ -730,7 +730,7 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 		return ctrl.Result{}, err, true, nil, nil
 	}
 
-	envs, err := r.getEnvsForExecution(ctx, ws)
+	envs, secretDescriptors, err := r.getEnvsForExecution(ctx, ws)
 	if err != nil {
 		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to get envs for execution: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to get envs for execution: %v", err), nil)
@@ -760,7 +760,11 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 		return ctrl.Result{}, err, true, nil, nil
 	}
 
-	return ctrl.Result{}, nil, false, tool, envs
+	// The fingerprint is stored in the workspace status, so it must not be derived from secret values
+	fingerprintEnvs := maps.Clone(envs)
+	maps.Copy(fingerprintEnvs, secretDescriptors)
+
+	return ctrl.Result{}, nil, false, tool, fingerprintEnvs
 }
 
 func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool) (ctrl.Result, error, bool) {
@@ -1119,9 +1123,11 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alph
 	return plan, nil
 }
 
-// getEnvsForExecution gets environment variables for terraform execution
-func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1alphav1.Workspace) (map[string]string, error) {
+// getEnvsForExecution gets environment variables for terraform execution. The second return value maps the names of
+// secret-backed variables to a description of the secret that doesn't contain its value.
+func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1alphav1.Workspace) (map[string]string, map[string]string, error) {
 	envs := make(map[string]string)
+	secretDescriptors := make(map[string]string)
 
 	if ws.Spec.TFExec != nil && ws.Spec.TFExec.Env != nil {
 		for _, env := range ws.Spec.TFExec.Env {
@@ -1136,7 +1142,7 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 				var cm v1.ConfigMap
 				err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: env.ConfigMapKeyRef.Name}, &cm)
 				if err != nil {
-					return nil, fmt.Errorf("failed to get configmap %s: %w", env.ConfigMapKeyRef.Name, err)
+					return nil, nil, fmt.Errorf("failed to get configmap %s: %w", env.ConfigMapKeyRef.Name, err)
 				}
 				if val, ok := cm.Data[env.ConfigMapKeyRef.Key]; ok {
 					envs[env.Name] = val
@@ -1144,11 +1150,12 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 				}
 			}
 			if env.SecretKeyRef != nil {
-				value, err := r.getSecretFromRef(ctx, ws, env.SecretKeyRef)
+				value, descriptor, err := r.getSecretFromRef(ctx, ws, env.SecretKeyRef)
 				if err != nil {
-					return nil, fmt.Errorf("failed to get secret for env %s: %w", env.Name, err)
+					return nil, nil, fmt.Errorf("failed to get secret for env %s: %w", env.Name, err)
 				}
 				envs[env.Name] = value
+				secretDescriptors[env.Name] = descriptor
 				continue
 			}
 		}
@@ -1159,7 +1166,7 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 			if ws.Spec.Authentication.AWS.ServiceAccountName != "" || ws.Spec.Authentication.AWS.RoleARN != "" {
 				tempTokenPath, err := r.setupAWSAuthentication(ctx, ws)
 				if err != nil {
-					return nil, fmt.Errorf("failed to setup AWS authentication: %w", err)
+					return nil, nil, fmt.Errorf("failed to setup AWS authentication: %w", err)
 				}
 
 				envs["AWS_WEB_IDENTITY_TOKEN_FILE"] = tempTokenPath
@@ -1170,15 +1177,15 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 		if ws.Spec.Authentication.Tokens != nil {
 			wsPath := r.Tf.GetWorkspacePath(ws)
 			for _, token := range ws.Spec.Authentication.Tokens {
-				value, err := r.getSecretFromRef(ctx, ws, &token.SecretKeyRef)
+				value, _, err := r.getSecretFromRef(ctx, ws, &token.SecretKeyRef)
 				if err != nil {
-					return nil, fmt.Errorf("failed to get token for env %s: %w", token.FilePathEnv, err)
+					return nil, nil, fmt.Errorf("failed to get token for env %s: %w", token.FilePathEnv, err)
 				}
 
 				tokenFilePath := filepath.Join(wsPath, fmt.Sprintf("%s-token", strings.ToLower(token.FilePathEnv)))
 				err = os.WriteFile(tokenFilePath, []byte(value), 0600)
 				if err != nil {
-					return nil, fmt.Errorf("failed to write token file for env %s: %w", token.FilePathEnv, err)
+					return nil, nil, fmt.Errorf("failed to write token file for env %s: %w", token.FilePathEnv, err)
 				}
 
 				envs[token.FilePathEnv] = tokenFilePath
@@ -1186,7 +1193,7 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 		}
 	}
 
-	return envs, nil
+	return envs, secretDescriptors, nil
 }
 
 // setupAWSAuthentication creates temporary AWS token file for authentication
@@ -1253,18 +1260,20 @@ func (r *WorkspaceReconciler) formatValidationDiagnostics(toolName string, diagn
 	return b.String()
 }
 
-func (r *WorkspaceReconciler) getSecretFromRef(ctx context.Context, ws *tfv1alphav1.Workspace, ref *tfv1alphav1.SecretKeySelector) (string, error) {
+func (r *WorkspaceReconciler) getSecretFromRef(ctx context.Context, ws *tfv1alphav1.Workspace, ref *tfv1alphav1.SecretKeySelector) (string, string, error) {
 	var secret v1.Secret
 	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ref.Name}, &secret)
 	if err != nil {
-		return "", fmt.Errorf("failed to get secret %s: %w", ref.Name, err)
+		return "", "", fmt.Errorf("failed to get secret %s: %w", ref.Name, err)
 	}
 	value, ok := secret.Data[ref.Key]
 	if !ok {
-		return "", fmt.Errorf("key %s not found in secret %s", ref.Key, ref.Name)
+		return "", "", fmt.Errorf("key %s not found in secret %s", ref.Key, ref.Name)
 	}
 
-	return string(value), nil
+	descriptor := fmt.Sprintf("secret:%s/%s@%s/%s", ref.Name, ref.Key, secret.UID, secret.ResourceVersion)
+
+	return string(value), descriptor, nil
 }
 
 func (r *WorkspaceReconciler) cleanupOldPlans(ctx context.Context, ws *tfv1alphav1.Workspace) error {
