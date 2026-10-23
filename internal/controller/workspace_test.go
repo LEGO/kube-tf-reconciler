@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/LEGO/kube-tf-reconciler/pkg/render"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
 	"github.com/go-logr/logr"
+	tfjson "github.com/hashicorp/terraform-json"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -585,6 +587,145 @@ func TestHandleManualRetry(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to clear backoff during manual retry")
 	})
 }
+
+func TestMissingSavedPlanIsReplannedBeforeManualApply(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
+
+	ws := newWs("missing-plan", "some-source")
+	ws.Generation = 1
+	ws.Spec.AutoApply = false
+	ws.Annotations = map[string]string{tfv1alphav1.ManualApplyAnnotation: "true"}
+	ws.Status = tfv1alphav1.WorkspaceStatus{
+		CurrentPlan:    &tfv1alphav1.PlanReference{Name: "missing-plan-1", Namespace: ws.Namespace},
+		HasChanges:     true,
+		NewPlanNeeded:  false,
+		NewApplyNeeded: false,
+	}
+
+	plan := &tfv1alphav1.Plan{
+		ObjectMeta: metav1.ObjectMeta{Name: "missing-plan-1", Namespace: ws.Namespace},
+		Spec:       tfv1alphav1.PlanSpec{WorkspaceRef: tfv1alphav1.WorkspaceReference{Name: ws.Name, Namespace: ws.Namespace}},
+	}
+	rootDir := t.TempDir()
+	exec := runner.New(rootDir)
+	require.NoError(t, exec.SetupWorkspace(ws))
+	require.NoError(t, os.Mkdir(filepath.Join(exec.GetWorkspacePath(ws), ".terraform"), 0755))
+	planPath := filepath.Join(exec.GetWorkspacePath(ws), planOutputPath)
+	require.NoError(t, os.WriteFile(planPath, []byte("old plan"), 0600))
+	require.NoError(t, os.Remove(planPath))
+
+	fakeClient := clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(ws, plan).
+		WithObjects(ws, plan).
+		Build()
+	tool := &replanningIaCTool{workspacePath: exec.GetWorkspacePath(ws), changed: true}
+	r := &WorkspaceReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+		Tf:       exec,
+	}
+
+	result, err, ret := r.handleRefreshDependencies(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.False(t, ret)
+	assert.False(t, result.Requeue)
+	assert.False(t, ws.Status.NewPlanNeeded)
+	assert.True(t, ws.Status.NewApplyNeeded)
+	assert.Zero(t, ws.Status.Backoff.RetryCount)
+
+	result, err, ret = r.handlePlan(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.False(t, ret)
+	assert.False(t, result.Requeue)
+	assert.Zero(t, tool.planCalls)
+
+	result, err, ret = r.handleApply(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.True(t, ret)
+	assert.True(t, result.Requeue)
+	assert.Equal(t, 0, tool.applyCalls)
+	assert.True(t, ws.Status.NewPlanNeeded)
+	assert.False(t, ws.Status.NewApplyNeeded)
+	assert.Zero(t, ws.Status.Backoff.RetryCount)
+
+	result, err, ret = r.handleRefreshDependencies(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.False(t, ret)
+	assert.False(t, result.Requeue)
+	assert.True(t, ws.Status.NewPlanNeeded)
+
+	result, err, ret = r.handlePlan(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.False(t, ret)
+	assert.False(t, result.Requeue)
+	assert.Equal(t, 1, tool.planCalls)
+
+	require.NoError(t, os.Remove(planPath))
+	result, err, ret = r.handleApply(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.True(t, ret)
+	assert.True(t, result.Requeue)
+	assert.Equal(t, 0, tool.applyCalls)
+
+	result, err, ret = r.handlePlan(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.False(t, ret)
+	assert.False(t, result.Requeue)
+	assert.Equal(t, 2, tool.planCalls)
+
+	result, err, ret = r.handleApply(t.Context(), ws, tool)
+	require.NoError(t, err)
+	assert.False(t, ret)
+	assert.False(t, result.Requeue)
+	assert.Equal(t, 1, tool.applyCalls)
+	assert.Equal(t, planOutputPath, tool.applyPlanPath)
+	assert.FileExists(t, planPath)
+
+	var got tfv1alphav1.Workspace
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(ws), &got))
+	assert.Equal(t, "true", got.Annotations[tfv1alphav1.ManualApplyAnnotation])
+	assert.Zero(t, got.Status.Backoff.RetryCount)
+	assert.Equal(t, TFPhaseCompleted, got.Status.TerraformPhase)
+}
+
+type replanningIaCTool struct {
+	workspacePath string
+	changed       bool
+	planCalls     int
+	applyCalls    int
+	applyPlanPath string
+}
+
+func (t *replanningIaCTool) Name() string                                     { return "terraform" }
+func (t *replanningIaCTool) Init(context.Context, ...runner.InitOption) error { return nil }
+func (t *replanningIaCTool) Validate(context.Context) (*tfjson.ValidateOutput, error) {
+	return &tfjson.ValidateOutput{Valid: true}, nil
+}
+func (t *replanningIaCTool) Plan(_ context.Context, opts ...runner.PlanOption) (bool, error) {
+	t.planCalls++
+	options := runner.PlanOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	return t.changed, os.WriteFile(filepath.Join(t.workspacePath, options.Out), []byte("new plan"), 0600)
+}
+func (t *replanningIaCTool) ShowPlanFileRaw(context.Context, string) (string, error) {
+	return "new plan", nil
+}
+func (t *replanningIaCTool) Apply(_ context.Context, planPath string) error {
+	t.applyCalls++
+	t.applyPlanPath = planPath
+	_, err := os.Stat(filepath.Join(t.workspacePath, planPath))
+	return err
+}
+func (t *replanningIaCTool) Destroy(context.Context) error  { return nil }
+func (t *replanningIaCTool) SetEnv(map[string]string) error { return nil }
+func (t *replanningIaCTool) SetStdout(io.Writer)            {}
+func (t *replanningIaCTool) SetStderr(io.Writer)            {}
 
 func plansForWs(ws *tfv1alphav1.Workspace) resources.ListOption {
 	return resources.WithLabelSelector(fmt.Sprintf("%s=%s", tfv1alphav1.WorkspacePlanLabel, ws.Name))

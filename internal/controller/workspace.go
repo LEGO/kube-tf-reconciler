@@ -55,6 +55,8 @@ const (
 	TFDestroyEventReason  = "TerraformDestroy"
 	TFValidateEventReason = "TerraformValidate"
 
+	planOutputPath = "plan.out"
+
 	// Terraform execution phases
 	TFPhaseIdle         = ""
 	TFPhaseInitializing = "Initializing"
@@ -422,7 +424,7 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		return ctrl.Result{}, nil, false
 	}
 
-	if ws.ManualApplyRequested() {
+	if ws.ManualApplyRequested() && ws.Status.CurrentPlan != nil && !ws.Status.NewPlanNeeded {
 		log.V(DebugLevel).Info("manual apply requested, proceeding with existing plan")
 		return ctrl.Result{}, nil, false
 	}
@@ -535,6 +537,24 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 	}
 
 	if ws.Status.HasChanges {
+		if _, err := os.Stat(filepath.Join(r.Tf.GetWorkspacePath(ws), planOutputPath)); err != nil {
+			if !os.IsNotExist(err) {
+				return ctrl.Result{}, fmt.Errorf("failed to check saved plan: %w", err), true
+			}
+			log.Info("saved plan is missing, requesting a new plan")
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+					return err
+				}
+				old := ws.DeepCopy()
+				ws.Status.NewPlanNeeded = true
+				ws.Status.NewApplyNeeded = false
+				return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+			}); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to request new plan: %w", err), true
+			}
+			return ctrl.Result{Requeue: true}, nil, true
+		}
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseApplying, fmt.Sprintf("Applying %s changes", tool.Name()), nil)
 
 		applyOutputCh, wg := r.streamOutput(ctx, ws, func(ws *tfv1alphav1.Workspace, output string) {
@@ -819,7 +839,7 @@ func (r *WorkspaceReconciler) executeTerraformApply(ctx context.Context, tool ru
 		if destroy {
 			err = tool.Destroy(ctx)
 		} else {
-			err = tool.Apply(ctx)
+			err = tool.Apply(ctx, planOutputPath)
 		}
 	}, func(so, se string) {
 		stdout = so
