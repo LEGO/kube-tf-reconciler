@@ -372,27 +372,6 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	}
 
 	if ws.ManualApplyRequested() && hasPlan {
-		_, statErr := os.Stat(filepath.Join(r.Tf.GetWorkspacePath(ws), planOutputPath))
-		if statErr != nil && !os.IsNotExist(statErr) {
-			return ctrl.Result{}, fmt.Errorf("failed to check saved plan: %w", statErr), true
-		}
-		if os.IsNotExist(statErr) {
-			log.Info("manual apply requested but saved plan is missing, creating a new plan")
-			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
-					return err
-				}
-				old := ws.DeepCopy()
-				ws.Status.NewPlanNeeded = true
-				ws.Status.NewApplyNeeded = false
-				return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
-			})
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to request new plan: %w", err), true
-			}
-			return ctrl.Result{}, nil, false
-		}
-
 		log.V(DebugLevel).Info("manual apply requested, marking apply needed")
 
 		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -445,15 +424,9 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		return ctrl.Result{}, nil, false
 	}
 
-	if ws.ManualApplyRequested() && ws.Status.CurrentPlan != nil {
-		_, statErr := os.Stat(filepath.Join(r.Tf.GetWorkspacePath(ws), planOutputPath))
-		if statErr != nil && !os.IsNotExist(statErr) {
-			return ctrl.Result{}, fmt.Errorf("failed to check saved plan: %w", statErr), true
-		}
-		if !os.IsNotExist(statErr) {
-			log.V(DebugLevel).Info("manual apply requested, proceeding with existing plan")
-			return ctrl.Result{}, nil, false
-		}
+	if ws.ManualApplyRequested() && ws.Status.CurrentPlan != nil && !ws.Status.NewPlanNeeded {
+		log.V(DebugLevel).Info("manual apply requested, proceeding with existing plan")
+		return ctrl.Result{}, nil, false
 	}
 
 	if !ws.Status.NewPlanNeeded {
