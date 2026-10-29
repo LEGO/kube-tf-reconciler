@@ -19,7 +19,7 @@ type IaCTool interface {
 	Validate(ctx context.Context) (*tfjson.ValidateOutput, error)
 	Plan(ctx context.Context, opts ...PlanOption) (bool, error)
 	ShowPlanFileRaw(ctx context.Context, planPath string) (string, error)
-	Apply(ctx context.Context) error
+	Apply(ctx context.Context, planPath string) error
 	Destroy(ctx context.Context) error
 	SetEnv(map[string]string) error
 	SetStdout(io.Writer)
@@ -109,8 +109,8 @@ func (t *TerraformTool) ShowPlanFileRaw(ctx context.Context, planPath string) (s
 	return t.tf.ShowPlanFileRaw(ctx, planPath)
 }
 
-func (t *TerraformTool) Apply(ctx context.Context) error {
-	return t.tf.Apply(ctx)
+func (t *TerraformTool) Apply(ctx context.Context, planPath string) error {
+	return t.tf.Apply(ctx, tfexec.DirOrPlan(planPath))
 }
 
 func (t *TerraformTool) Destroy(ctx context.Context) error {
@@ -174,8 +174,8 @@ func (t *TofuTool) ShowPlanFileRaw(ctx context.Context, planPath string) (string
 	return t.tf.ShowPlanFileRaw(ctx, planPath)
 }
 
-func (t *TofuTool) Apply(ctx context.Context) error {
-	return t.tf.Apply(ctx)
+func (t *TofuTool) Apply(ctx context.Context, planPath string) error {
+	return t.tf.Apply(ctx, tofuexec.DirOrPlan(planPath))
 }
 
 func (t *TofuTool) Destroy(ctx context.Context) error {
