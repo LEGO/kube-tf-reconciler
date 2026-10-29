@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
+	"slices"
 
 	tfreconcilev1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
 	"github.com/hashicorp/hcl/v2/hclwrite"
@@ -35,9 +37,9 @@ func addBackend(body *hclwrite.Body, backend tfreconcilev1alpha1.BackendSpec) er
 			return fmt.Errorf("could not unmarshal inputs: %w", err)
 		}
 
-		// Set each key-value pair as an attribute in the backend block
-		for key, value := range inputs {
-			switch v := value.(type) {
+		// Sorted so main.tf is byte-for-byte stable, the init fingerprint depends on it
+		for _, key := range slices.Sorted(maps.Keys(inputs)) {
+			switch v := inputs[key].(type) {
 			case string:
 				be.Body().SetAttributeValue(key, cty.StringVal(v))
 			case float64:
