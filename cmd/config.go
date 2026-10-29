@@ -3,6 +3,7 @@ package cmd
 import (
 	"reflect"
 	"strconv"
+	"time"
 
 	"github.com/LEGO/kube-tf-reconciler/internal/controller"
 	"github.com/lukaspj/go-fang"
@@ -25,6 +26,12 @@ func ConfigFromEnvironmentWithPrefix(envPrefix string) (controller.Config, error
 			}
 
 			return strconv.ParseBool(data.(string))
+		}, func(from, to reflect.Type, data any) (any, error) {
+			if from.Kind() != reflect.String || to != reflect.TypeFor[time.Duration]() {
+				return data, nil
+			}
+
+			return time.ParseDuration(data.(string))
 		}).
 		WithConfigFile(fang.ConfigFileOptions{
 			Paths: []string{"$HOME", "."},
