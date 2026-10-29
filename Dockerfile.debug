@@ -17,7 +17,10 @@ RUN CGO_ENABLED=0 go build -gcflags="all=-N -l" -ldflags "-X cmd.commit=$SHA -X 
 FROM alpine:3.24
 
 # Install certificates and debugging tools
-RUN apk add --no-cache ca-certificates git openssh-client
+# Upgrade base packages and require patched brotli-libs (CVE-2026-111497, pulled in via git -> libcurl).
+# The version constraint makes the build fail instead of silently shipping a vulnerable image.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates git openssh-client 'brotli-libs>=1.2.1-r0'
 
 COPY --from=build /src/krec /usr/local/bin/krec
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

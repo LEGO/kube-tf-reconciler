@@ -5,6 +5,7 @@ on:
     paths:
       - "**/*.go"
       - go.mod
+      - Dockerfile
   push:
     branches: [ main ]
 
