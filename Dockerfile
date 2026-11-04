@@ -4,9 +4,10 @@ RUN apk add --no-cache ca-certificates && update-ca-certificates
 
 WORKDIR /src
 
-# Download modules in their own layer. Only a go.mod or go.sum change runs this again.
+# Keep the modules in the layer, not in a cache mount: the CI layer cache (type=gha)
+# does not export cache mounts. Only a go.mod or go.sum change runs this again.
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
+RUN go mod download
 
 COPY . .
 
@@ -14,8 +15,8 @@ COPY . .
 ARG SHA
 ARG DATE
 
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+# The compiler cache mount helps local builds only. CI starts with an empty mount.
+RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
 
 FROM alpine:3.24 AS krec

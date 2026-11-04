@@ -7,9 +7,10 @@ RUN go install github.com/go-delve/delve/cmd/dlv@latest
 
 WORKDIR /src
 
-# Download modules in their own layer. Only a go.mod or go.sum change runs this again.
+# Keep the modules in the layer, not in a cache mount: the CI layer cache (type=gha)
+# does not export cache mounts. Only a go.mod or go.sum change runs this again.
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
+RUN go mod download
 
 COPY . .
 
@@ -17,9 +18,8 @@ COPY . .
 ARG SHA
 ARG DATE
 
-# Build with debugging information
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+# Build with debugging information. The compiler cache mount helps local builds only.
+RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -gcflags="all=-N -l" -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
 
 FROM alpine:3.24
