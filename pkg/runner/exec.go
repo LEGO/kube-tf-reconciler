@@ -148,11 +148,17 @@ func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) 
 		return "", fmt.Errorf("failed to create install dir: %w", err)
 	}
 
-	// Not installed or missing — do the install
 	tfVersion, err := version.NewVersion(terraformVersion)
 	if err != nil {
 		return "", fmt.Errorf("invalid terraform version %q: %w", terraformVersion, err)
 	}
+
+	// An earlier process (for example, before a pod restart) can have installed it already.
+	if execPath, ok := installedTerraform(ctx, installDir, tfVersion); ok {
+		e.installedVersions[cacheKey] = execPath
+		return execPath, nil
+	}
+
 	installer := &releases.ExactVersion{
 		Product:    product.Terraform,
 		InstallDir: installDir,
@@ -167,6 +173,17 @@ func (e *Exec) getTerraformBinary(ctx context.Context, terraformVersion string) 
 
 	e.installedVersions[cacheKey] = execPath
 	return execPath, nil
+}
+
+// installedTerraform returns the binary in dir if it runs and reports the version want.
+// A partial or wrong binary fails the check, and the caller then installs again.
+func installedTerraform(ctx context.Context, dir string, want *version.Version) (string, bool) {
+	execPath := filepath.Join(dir, product.Terraform.BinaryName())
+	got, err := product.Terraform.GetVersion(ctx, execPath)
+	if err != nil || !got.Equal(want) {
+		return "", false
+	}
+	return execPath, true
 }
 
 func (e *Exec) getTofuBinary(ctx context.Context, tofuVersion string) (string, error) {

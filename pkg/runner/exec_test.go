@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/go-version"
 	"github.com/hashicorp/terraform-exec/tfexec"
 	tofuexec "github.com/opentofu/tofu-exec/tfexec"
 	"github.com/stretchr/testify/assert"
@@ -135,6 +136,49 @@ func TestMultipleVersions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTerraformBinaryReusedAcrossExecs(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+
+	first, err := New(dir).getBinary(ctx, tfreconcilev1alpha1.ToolTerraform, "1.11.2")
+	require.NoError(t, err)
+	before, err := os.Stat(first)
+	require.NoError(t, err)
+
+	// A new Exec on the same root has an empty in-memory cache, as after a pod restart.
+	second, err := New(dir).getBinary(ctx, tfreconcilev1alpha1.ToolTerraform, "1.11.2")
+	require.NoError(t, err)
+	after, err := os.Stat(second)
+	require.NoError(t, err)
+
+	assert.Equal(t, first, second)
+	assert.Equal(t, before.ModTime(), after.ModTime(), "binary was downloaded again")
+}
+
+func TestInstalledTerraformRejectsBadBinary(t *testing.T) {
+	want := version.Must(version.NewVersion("1.11.2"))
+
+	t.Run("missing", func(t *testing.T) {
+		_, ok := installedTerraform(t.Context(), t.TempDir(), want)
+		assert.False(t, ok)
+	})
+
+	t.Run("not terraform", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "terraform"), []byte("#!/bin/sh\nexit 1\n"), 0755))
+		_, ok := installedTerraform(t.Context(), dir, want)
+		assert.False(t, ok)
+	})
+
+	t.Run("other version", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := New(dir).getBinary(t.Context(), tfreconcilev1alpha1.ToolTerraform, "1.14.3")
+		require.NoError(t, err)
+		_, ok := installedTerraform(t.Context(), filepath.Join(dir, "installs", "terraform", "1.14.3"), want)
+		assert.False(t, ok)
+	})
 }
 
 func TestGetIaCToolForWorkspaceToolSelection(t *testing.T) {

@@ -88,7 +88,7 @@ func TestWorkspaceController(t *testing.T) {
 	})
 	modHost.AddFileToModule("my-module", "main.tf", moduleStateServer.GetModule("my-module"))
 
-	rootDir := t.TempDir() // testutils.TestDataFolder() // Enable to better introspection into test data
+	rootDir := testutils.RunnerRoot(t) // testutils.TestDataFolder() // Enable to better introspection into test data
 	t.Logf("using root dir: %s", rootDir)
 	err = (&WorkspaceReconciler{
 		Client:   mgr.GetClient(),
@@ -115,13 +115,13 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.NotEmpty(t, ws.Status.LastPlanOutput)
 		assert.NotEmpty(t, ws.Status.InitOutput)
 
 		events := &v1.EventList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		var reasons []string
 		for _, e := range events.Items {
@@ -129,7 +129,7 @@ func TestWorkspaceController(t *testing.T) {
 		}
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListMatchN(plans, 1, planInPhase(tfv1alphav1.PlanPhaseApplied), plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.NoError(t, err)
 		require.Len(t, plans.Items, 1)
@@ -151,7 +151,7 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.AutoApply = false
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		ws.Annotations = map[string]string{
@@ -159,14 +159,14 @@ func TestWorkspaceController(t *testing.T) {
 		}
 		assert.NoError(t, k.Resources().Update(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			_, ok := object.GetAnnotations()[tfv1alphav1.ManualApplyAnnotation]
 			return !ok
 		}))
 		assert.NoError(t, err)
 
 		events := &v1.EventList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		var reasons []string
 		for _, e := range events.Items {
@@ -174,7 +174,7 @@ func TestWorkspaceController(t *testing.T) {
 		}
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListMatchN(plans, 1, planInPhase(tfv1alphav1.PlanPhaseApplied), plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
@@ -230,7 +230,7 @@ func TestWorkspaceController(t *testing.T) {
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.FileExists(t, filepath.Join(rootDir, "workspaces", ws.Namespace, ws.Name, "aws_token_file-token"))
 		assert.FileExists(t, filepath.Join(rootDir, "workspaces", ws.Namespace, ws.Name, "aws-token"))
@@ -246,18 +246,18 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.Module.Name = modName
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		// Not destroyed because we skipped
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
@@ -273,18 +273,18 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.Module.Name = modName
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		// Auto destroyed
 		assert.Equal(t, testutils.ModuleEventDestroy, moduleStateServer.CurrentStatus(modName))
@@ -300,17 +300,17 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.Module.Name = modName
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsTerraformMessage("Auto-destroy is disabled, awaiting manual destroy")), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsTerraformMessage("Auto-destroy is disabled, awaiting manual destroy")), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
 
@@ -319,7 +319,7 @@ func TestWorkspaceController(t *testing.T) {
 		}
 		assert.NoError(t, k.Resources().Update(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventDestroy, moduleStateServer.CurrentStatus(modName))
 	})
@@ -331,15 +331,15 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.AutoApply = false
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
 		for _, p := range plans.Items {
@@ -357,7 +357,7 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.PlanHistoryLimit = 1
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		ws.Spec.Module.Inputs = testutils.Json(map[string]interface{}{
@@ -365,11 +365,11 @@ func TestWorkspaceController(t *testing.T) {
 		})
 		assert.NoError(t, k.Resources().Update(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
 		assert.Equal(t, 2, int(ws.Generation))
@@ -383,7 +383,7 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			w := object.(*tfv1alphav1.Workspace)
 			return w.Status.TerraformPhase == TFPhaseErrored &&
 				w.Status.LastErrorMessage != "" &&
@@ -409,7 +409,7 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			w := object.(*tfv1alphav1.Workspace)
 			return w.Status.TerraformPhase == TFPhaseErrored &&
 				w.Status.LastErrorMessage != "" &&
@@ -440,7 +440,7 @@ resource "random_pet" "name" {
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			w := object.(*tfv1alphav1.Workspace)
 			return w.Status.TerraformPhase == TFPhaseErrored &&
 				w.Status.LastErrorMessage != "" &&
@@ -475,7 +475,7 @@ resource "random_pet" "name" {
 		})
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			w := object.(*tfv1alphav1.Workspace)
 			return w.Status.TerraformPhase == TFPhaseErrored &&
 				w.Status.LastErrorMessage != "" &&
@@ -496,7 +496,7 @@ resource "random_pet" "name" {
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		assert.Equal(t, TFPhaseCompleted, ws.Status.TerraformPhase)
@@ -590,6 +590,13 @@ func TestHandleManualRetry(t *testing.T) {
 
 func plansForWs(ws *tfv1alphav1.Workspace) resources.ListOption {
 	return resources.WithLabelSelector(fmt.Sprintf("%s=%s", tfv1alphav1.WorkspacePlanLabel, ws.Name))
+}
+
+func planInPhase(phase tfv1alphav1.PlanPhase) func(k8s.Object) bool {
+	return func(object k8s.Object) bool {
+		plan, ok := object.(*tfv1alphav1.Plan)
+		return ok && plan.Status.Phase == phase
+	}
 }
 
 func newWs(name, moduleSource string) *tfv1alphav1.Workspace {
@@ -687,7 +694,7 @@ resource "random_pet" "name" {
 		WithObjects(freeWs, lockedWs, expiredWs, otherLease, expiredLease).
 		Build()
 
-	rootDir := t.TempDir()
+	rootDir := testutils.RunnerRoot(t)
 	reconciler := &WorkspaceReconciler{
 		Client:   client,
 		Scheme:   scheme,
@@ -974,7 +981,7 @@ func TestSkipInitReconciliation(t *testing.T) {
 	}}
 
 	c := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(ws, &tfv1alphav1.Plan{}).WithObjects(ws, secret).Build()
-	rootDir := t.TempDir()
+	rootDir := testutils.RunnerRoot(t)
 	r := &WorkspaceReconciler{
 		Client:   c,
 		Scheme:   scheme,
@@ -1075,7 +1082,7 @@ func TestSkipInitAcrossPods(t *testing.T) {
 
 	c := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(ws, &tfv1alphav1.Plan{}).WithObjects(ws).Build()
 	newPod := func() *WorkspaceReconciler {
-		rootDir := t.TempDir()
+		rootDir := testutils.RunnerRoot(t)
 		return &WorkspaceReconciler{
 			Client:   c,
 			Scheme:   scheme,

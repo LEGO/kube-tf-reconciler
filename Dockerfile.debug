@@ -5,14 +5,22 @@ RUN apk add --no-cache ca-certificates git && update-ca-certificates
 # Install Delve debugger from source
 RUN go install github.com/go-delve/delve/cmd/dlv@latest
 
+WORKDIR /src
+
+# Download modules in their own layer. Only a go.mod or go.sum change runs this again.
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+COPY . .
+
+# Declare the args late: a new value invalidates the cache for each RUN after the ARG.
 ARG SHA
 ARG DATE
 
-COPY . /src
-WORKDIR /src
-
 # Build with debugging information
-RUN CGO_ENABLED=0 go build -gcflags="all=-N -l" -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -gcflags="all=-N -l" -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
 
 FROM alpine:3.24
 
