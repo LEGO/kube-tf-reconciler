@@ -18,7 +18,7 @@
   in {
     packages = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};
-      krec = pkgs.buildGoModule {
+      krec = pkgs.buildGoLatestModule {
         pname = "krec";
         version = "nix";
         src = ./.;
@@ -61,7 +61,7 @@
     in {
       default = pkgs.mkShell {
         packages = with pkgs; [
-          go
+          go_latest
           kubectl
           kind
         ];
