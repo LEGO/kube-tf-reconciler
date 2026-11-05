@@ -369,7 +369,14 @@ func TestWorkspaceController(t *testing.T) {
 		assert.NoError(t, err)
 
 		plans := &tfv1alphav1.PlanList{}
-		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
+		// ObservedGeneration is set before cleanupOldPlans runs, so wait for the old plan to go.
+		err = testutils.WaitFor(func(ctx context.Context) (bool, error) {
+			if err := k.Resources().List(ctx, plans, plansForWs(ws)); err != nil {
+				return false, nil
+			}
+			return len(plans.Items) == 1 && plans.Items[0].Name == fmt.Sprintf("%s-2", ws.Name), nil
+		}, wait.WithContext(ctx))
+		assert.NoError(t, err)
 
 		assert.Len(t, plans.Items, 1)
 		assert.Equal(t, 2, int(ws.Generation))
