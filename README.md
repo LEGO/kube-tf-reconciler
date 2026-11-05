@@ -160,6 +160,11 @@ Running tests
 go test ./... -v
 ```
 
+The controller tests share Terraform installs and providers in one cache folder, so only
+the first run downloads them. The default folder is `krec-test` in the user cache folder
+(`~/Library/Caches` on macOS, `~/.cache` on Linux). Set `KREC_TEST_CACHE_DIR` to use a
+different folder. CI caches this folder between runs.
+
 ## Debugging in a live cluster
 
 To debug the operator locally:

@@ -2,13 +2,20 @@ FROM golang:1.27.3-alpine3.24 AS build
 
 RUN apk add --no-cache ca-certificates && update-ca-certificates
 
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Declare the args late: a new value invalidates the cache for each RUN after the ARG.
 ARG SHA
 ARG DATE
 
-COPY . /src
-WORKDIR /src
-
-RUN CGO_ENABLED=0 go build -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
+# The compiler cache mount helps local builds only. CI starts with an empty mount.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
 
 FROM alpine:3.24 AS krec
 

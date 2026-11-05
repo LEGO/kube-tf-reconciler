@@ -44,8 +44,7 @@ func TestE2E(t *testing.T) {
 	require.NoError(t, err)
 	err = k.LoadImage(ctx, operatorImage)
 	assert.NoError(t, err)
-	err = testutils.SetupCRDs(client, ctx, testutils.CRDFolder(), "*")
-	assert.NoError(t, err)
+	// The chart installs the CRDs from its templates folder.
 	err = testutils.CreateNamespace(client, ctx, operatorNs)
 	assert.NoError(t, err)
 
@@ -53,17 +52,19 @@ func TestE2E(t *testing.T) {
 		helm.WithChart(filepath.Join(testutils.RootFolder(), "charts", "terraform-reconciler")),
 		helm.WithNamespace(operatorNs),
 		helm.WithArgs("--set image.tag=latest"),
-		helm.WithArgs("--skip-crds"),
+		// Kind has no Prometheus Operator CRDs.
+		helm.WithArgs("--set serviceMonitor.enabled=false"),
 		helm.WithName(operatorName),
 		helm.WithWait(),
-		helm.WithTimeout("10s"))
+		helm.WithTimeout("2m"))
 	assert.NoError(t, err)
 	t.Cleanup(func() {
-		err = testutils.RunHelmUninstall(k.GetKubeconfig(), helm.WithNamespace(operatorNs), helm.WithName(operatorName))
+		// Cleanup runs after cancel(), thus it needs its own context.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cleanupCancel()
+		err := testutils.RunHelmUninstall(k.GetKubeconfig(), helm.WithNamespace(operatorNs), helm.WithName(operatorName))
 		t.Log(err)
-		err = testutils.TeardownCRDs(client, ctx, testutils.CRDFolder(), "*")
-		t.Log(err)
-		err = testutils.DeleteNamespace(client, ctx, operatorNs)
+		err = testutils.DeleteNamespace(client, cleanupCtx, operatorNs)
 		t.Log(err)
 	})
 	go func() {
