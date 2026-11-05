@@ -7,8 +7,6 @@ RUN go install github.com/go-delve/delve/cmd/dlv@latest
 
 WORKDIR /src
 
-# Keep the modules in the layer, not in a cache mount: the CI layer cache (type=gha)
-# does not export cache mounts. Only a go.mod or go.sum change runs this again.
 COPY go.mod go.sum ./
 RUN go mod download
 

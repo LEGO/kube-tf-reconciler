@@ -4,8 +4,6 @@ RUN apk add --no-cache ca-certificates && update-ca-certificates
 
 WORKDIR /src
 
-# Keep the modules in the layer, not in a cache mount: the CI layer cache (type=gha)
-# does not export cache mounts. Only a go.mod or go.sum change runs this again.
 COPY go.mod go.sum ./
 RUN go mod download
 
