@@ -166,7 +166,8 @@ func TestWorkspaceController(t *testing.T) {
 		assert.NoError(t, err)
 
 		events := &v1.EventList{}
-		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
+		// The manual apply adds a 4th event, and the event recorder writes it asynchronously.
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(events, 4, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		var reasons []string
 		for _, e := range events.Items {
