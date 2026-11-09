@@ -8,3 +8,4 @@ result
 .pages/resources
 .pages/public
 .pages/.hugo_build.lock
+.krec-test-cache/

@@ -5,12 +5,18 @@ on:
     paths:
       - "**/*.go"
       - go.mod
+      - .github/workflows/go-test.yaml
   push:
     branches:
       - main
     paths:
       - "**/*.go"
       - go.mod
+      - .github/workflows/go-test.yaml
+
+env:
+  # internal/testutils.RunnerRoot keeps Terraform installs and providers here.
+  KREC_TEST_CACHE_DIR: ${{ github.workspace }}/.krec-test-cache
 
 jobs:
   build-and-test:
@@ -24,8 +30,24 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Cache envtest binaries
+        uses: actions/cache@v4
+        with:
+          path: bin/k8s
+          key: envtest-1.32.0-${{ runner.os }}-${{ runner.arch }}
+
       - name: Setup Dependencies
         run: go tool setup-envtest use 1.32.0 --bin-dir bin/ -p path
+
+      # The key changes when the tests change their Terraform versions or providers.
+      # A partial match still restores the older binaries and providers.
+      - name: Cache Terraform installs and providers
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.KREC_TEST_CACHE_DIR }}
+          key: krec-test-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('internal/controller/*_test.go') }}
+          restore-keys: |
+            krec-test-tools-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build
         run: go build -v ./...

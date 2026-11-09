@@ -1,0 +1,14 @@
+# The image build needs only the Go sources and pkg/ui/assets (go:embed).
+.git
+.github
+.pages
+docs
+samples
+charts
+bin
+result
+.testdata
+**/.DS_Store
+*.md
+Dockerfile*
+.krec-test-cache
