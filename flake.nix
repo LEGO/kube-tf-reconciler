@@ -18,7 +18,7 @@
   in {
     packages = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};
-      krec = pkgs.buildGoModule {
+      krec = pkgs.buildGoLatestModule {
         pname = "krec";
         version = "nix";
         src = ./.;
@@ -27,7 +27,7 @@
         # How to get the vendorHash:
         # Option 1: set to pkgs.lib.fakeHash and paste the value at build time
         # Option 2: go mod vendor && nix hash path --sri ./vendor
-        vendorHash = "sha256-za9tc1Hg4Fy6T7WrYkEnhM8hF9fatZ7l6d3Vu03gnaQ=";
+        vendorHash = "sha256-omlzJCSVypolUqwIM1FNfSEfxLCr7GncWSXZu/f4VV4=";
 
         env.CGO_ENABLED = "0";
 
@@ -61,7 +61,7 @@
     in {
       default = pkgs.mkShell {
         packages = with pkgs; [
-          go
+          go_latest
           kubectl
           kind
         ];
