@@ -6,6 +6,7 @@ on:
       - "**/*.go"
       - go.mod
       - .github/workflows/build-push.yml
+      - Dockerfile
   push:
     branches: [ main ]
 
@@ -73,6 +74,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
+          # Keep the layers between runs. A PR run writes to its own cache scope only.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           build-args: |
             SHA=${{ github.sha }}
             DATE=${{ steps.date.outputs.BUILD_DATE }}

@@ -19,7 +19,6 @@ import (
 	"github.com/LEGO/kube-tf-reconciler/pkg/metrics"
 	"github.com/LEGO/kube-tf-reconciler/pkg/render"
 	"github.com/LEGO/kube-tf-reconciler/pkg/runner"
-	"github.com/hashicorp/terraform-exec/tfexec"
 	tfjson "github.com/hashicorp/terraform-json"
 	authv1 "k8s.io/api/authentication/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -46,9 +45,10 @@ import (
 const (
 	DebugLevel = 2
 
-	defaultPlanHistoryLimit = 3
-	planCreationTimeout     = 2 * time.Second
-	nextRefreshInterval     = 30 * time.Minute
+	defaultPlanHistoryLimit  = 3
+	planCreationTimeout      = 2 * time.Second
+	nextRefreshInterval      = 30 * time.Minute
+	defaultForceInitInterval = 24 * time.Hour
 
 	TFErrEventReason      = "TerraformError"
 	TFPlanEventReason     = "TerraformPlan"
@@ -121,6 +121,8 @@ type WorkspaceReconciler struct {
 	Tf       *runner.Exec
 	Renderer render.Renderer
 	leases   *sync.Map
+
+	ForceInitInterval time.Duration
 }
 
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -149,7 +151,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		metrics.SetWorkspacePhase(ws.Namespace, ws.Name, TFPhaseIdle)
 	}
 
-	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) {
+	if ws.Status.Backoff.NextRetryTime != nil && ws.Status.Backoff.NextRetryTime.After(time.Now()) && !ws.ManualRetryRequested() {
 		slog.InfoContext(ctx, "backing off retrying plan", "workspace", req.String(), "retryCount", ws.Status.Backoff.RetryCount)
 		return ctrl.Result{RequeueAfter: time.Until(ws.Status.Backoff.NextRetryTime.Time)}, nil
 	}
@@ -170,14 +172,23 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}()
 
 	logf.IntoContext(ctx, log.WithValues("workspace", req.String()))
-	if ws.Status.ObservedGeneration == ws.Generation && time.Now().Before(ws.Status.NextRefreshTimestamp.Time) && !ws.ManualApplyRequested() {
+	if ws.Status.ObservedGeneration == ws.Generation &&
+		time.Now().Before(ws.Status.NextRefreshTimestamp.Time) &&
+		!ws.ManualRetryRequested() &&
+		!ws.ManualApplyRequested() {
 		return ctrl.Result{RequeueAfter: time.Until(ws.Status.NextRefreshTimestamp.Time)}, nil
 	}
 
 	// Record reconciliation attempt
 	metrics.RecordReconciliation(ws.Namespace, ws.Name)
 
-	res, err, ret, tf := r.setupTerraformForWorkspace(ctx, ws)
+	forceInit := ws.ManualRetryRequested()
+
+	if res, err, ret := r.handleManualRetry(ctx, ws); ret {
+		return res, err
+	}
+
+	res, err, ret, tool, fingerprintEnvs := r.setupTerraformForWorkspace(ctx, ws)
 	if ret {
 		if err != nil {
 			err = fmt.Errorf("setupTerraformForWorkspace: %w", err)
@@ -196,7 +207,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	if res, err, ret = r.handleRefreshDependencies(ctx, ws, tf); ret {
+	if res, err, ret = r.handleRefreshDependencies(ctx, ws, tool, fingerprintEnvs, forceInit); ret {
 		if err != nil {
 			err = fmt.Errorf("handleRefreshDependencies: %w", err)
 			r.backoff(ctx, ws)
@@ -205,7 +216,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	if res, err, ret = r.handleDeletionAndFinalizers(ctx, ws, tf); ret {
+	if res, err, ret = r.handleDeletionAndFinalizers(ctx, ws, tool); ret {
 		if err != nil {
 			err = fmt.Errorf("handleDeletionAndFinalizers: %w", err)
 			r.backoff(ctx, ws)
@@ -214,7 +225,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	if res, err, ret = r.handlePlan(ctx, ws, tf); ret {
+	if res, err, ret = r.handlePlan(ctx, ws, tool); ret {
 		if err != nil {
 			err = fmt.Errorf("handlePlan: %w", err)
 			r.backoff(ctx, ws)
@@ -223,7 +234,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return res, err
 	}
 
-	if res, err, ret = r.handleApply(ctx, ws, tf); ret {
+	if res, err, ret = r.handleApply(ctx, ws, tool); ret {
 		if err != nil {
 			err = fmt.Errorf("handleApply: %w", err)
 			r.backoff(ctx, ws)
@@ -273,10 +284,28 @@ func (r *WorkspaceReconciler) handleRendering(ctx context.Context, ws *tfv1alpha
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
+func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool, fingerprintEnvs map[string]string, forceInit bool) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
-	_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseInitializing, "Initializing Terraform workspace", func(s *tfv1alphav1.WorkspaceStatus) {
+	log.V(DebugLevel).Info("refresh dependencies starting")
+	defer log.V(DebugLevel).Info("refresh dependencies completed")
+
+	skip, reason := r.initSkipDecision(ws, fingerprintEnvs, forceInit)
+	if skip {
+		log.Info("skipping init and validate, inputs unchanged and modules pinned", "workspace", ws.Name)
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseInitializing, fmt.Sprintf("%s init skipped: %s", capitalize(tool.Name()), reason), func(s *tfv1alphav1.WorkspaceStatus) {
+			s.LastErrorTime = nil
+			s.LastErrorMessage = ""
+			s.LastPlanOutput = ""
+			s.LastApplyOutput = ""
+			s.InitOutput = fmt.Sprintf("%s init skipped: %s", capitalize(tool.Name()), reason)
+		})
+
+		return r.decidePlanAfterInit(ctx, ws, "")
+	}
+	log.V(DebugLevel).Info("running full init", "reason", reason)
+
+	_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseInitializing, fmt.Sprintf("Initializing %s workspace", capitalize(tool.Name())), func(s *tfv1alphav1.WorkspaceStatus) {
 		// Reset all debug information
 		s.LastErrorTime = nil
 		s.LastErrorMessage = ""
@@ -285,38 +314,39 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 		s.InitOutput = ""
 	})
 
-	log.V(DebugLevel).Info("refresh dependencies starting")
-	defer log.V(DebugLevel).Info("refresh dependencies completed")
+	if err := r.Tf.RemoveInitMarker(ws); err != nil {
+		log.Error(err, "failed to remove init marker", "workspace", ws.Name)
+	}
 
 	initOutputCh, wg := r.streamOutput(ctx, ws, func(ws *tfv1alphav1.Workspace, output string) {
 		ws.Status.InitOutput = output
 	})
 
-	err := r.Tf.TerraformInit(ctx, tf, func(stdout, stderr string) {
-		output, _ := constructOutput(stdout, stderr, nil)
+	err := r.Tf.TerraformInit(ctx, tool, func(stdout, stderr string) {
+		output, _ := constructOutput(tool.Name(), stdout, stderr, nil)
 		initOutputCh <- output
-	}, tfexec.Upgrade(true))
+	}, runner.WithUpgrade())
 
 	close(initOutputCh)
 	wg.Wait()
 
 	if err != nil {
-		err = fmt.Errorf("terraform init failed: %w", err)
+		err = fmt.Errorf("%s init failed: %w", tool.Name(), err)
 		r.Recorder.Event(ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, err.Error(), nil)
 		return ctrl.Result{}, err, true
 	}
 
-	valResult, err := tf.Validate(ctx)
+	valResult, err := tool.Validate(ctx)
 	if err != nil {
-		log.Error(err, "failed to validate terraform", "workspace", ws.Name)
-		err = fmt.Errorf("terraform validate failed: %w", err)
+		log.Error(err, "failed to validate "+tool.Name(), "workspace", ws.Name)
+		err = fmt.Errorf("%s validate failed: %w", tool.Name(), err)
 		r.Recorder.Event(ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, err.Error(), nil)
 		return ctrl.Result{}, err, true
 	}
 
-	r.Recorder.Eventf(ws, v1.EventTypeNormal, TFValidateEventReason, "Terraform validation completed, valid: %t", valResult.Valid)
+	r.Recorder.Eventf(ws, v1.EventTypeNormal, TFValidateEventReason, "%s validation completed, valid: %t", capitalize(tool.Name()), valResult.Valid)
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
@@ -331,19 +361,21 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 
 	if err != nil {
 		log.Error(err, "failed to get workspace object from Kubernetes API", "workspace", ws.Name)
-		err = fmt.Errorf("terraform initialize failed: %w", err)
+		err = fmt.Errorf("%s initialize failed: %w", tool.Name(), err)
 		r.Recorder.Event(ws, v1.EventTypeWarning, TFErrEventReason, err.Error())
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, err.Error(), nil)
 		return ctrl.Result{}, err, true
 	}
 
 	if !valResult.Valid {
-		log.Error(err, "Terraform validation failed", "workspace", ws.Name)
-		diagnosticsMsg := r.formatValidationDiagnostics(valResult.Diagnostics)
-		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFValidateEventReason, "Terraform validation failed: %s", diagnosticsMsg)
+		log.Error(err, capitalize(tool.Name())+" validation failed", "workspace", ws.Name)
+		diagnosticsMsg := r.formatValidationDiagnostics(tool.Name(), valResult.Diagnostics)
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFValidateEventReason, "%s validation failed: %s", capitalize(tool.Name()), diagnosticsMsg)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, diagnosticsMsg, nil)
-		return ctrl.Result{}, fmt.Errorf("terraform validation failed: %s", diagnosticsMsg), true
+		return ctrl.Result{}, fmt.Errorf("%s validation failed: %s", tool.Name(), diagnosticsMsg), true
 	}
+
+	r.recordSuccessfulInit(ctx, ws, fingerprintEnvs)
 
 	sum, err := r.Tf.CalculateChecksum(ws)
 	if err != nil {
@@ -352,8 +384,102 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 		return ctrl.Result{}, err, true
 	}
 
+	return r.decidePlanAfterInit(ctx, ws, sum)
+}
+
+func (r *WorkspaceReconciler) initSkipDecision(ws *tfv1alphav1.Workspace, fingerprintEnvs map[string]string, forceInit bool) (bool, string) {
+	switch {
+	case forceInit:
+		return false, "manual retry requested"
+	case !ws.DeletionTimestamp.IsZero():
+		return false, "workspace is being deleted"
+	case ws.Status.ObservedGeneration != ws.Generation:
+		return false, "workspace spec changed"
+	case ws.Status.TerraformPhase != TFPhaseCompleted || ws.Status.Backoff.RetryCount > 0 || !ws.Status.ValidRender:
+		return false, "previous reconciliation did not complete successfully"
+	case ws.Spec.Module == nil || !runner.IsPinnedModuleSource(ws.Spec.Module.Source, ws.Spec.Module.Version):
+		return false, "module source is not pinned to an immutable revision"
+	}
+
+	marker, err := r.Tf.ReadInitMarker(ws)
+	switch {
+	case err != nil:
+		return false, fmt.Sprintf("failed to read init marker: %v", err)
+	case marker == nil:
+		return false, "no previous successful init recorded"
+	case marker.BootID != r.Tf.BootID:
+		return false, "first init since operator start"
+	case marker.Generation != ws.Generation:
+		return false, "previous init was for another generation"
+	case time.Since(marker.InitializedAt) > r.forceInitInterval():
+		return false, fmt.Sprintf("last full init is older than %s", r.forceInitInterval())
+	}
+
+	pinned, err := r.Tf.NestedModulesPinned(ws)
+	if err != nil {
+		return false, fmt.Sprintf("cannot verify installed modules: %v", err)
+	}
+	if !pinned {
+		return false, "a nested module source is not pinned to an immutable revision"
+	}
+
+	fingerprint, err := r.Tf.InitFingerprint(ws, fingerprintEnvs)
+	if err != nil {
+		return false, fmt.Sprintf("failed to calculate init fingerprint: %v", err)
+	}
+	if fingerprint != marker.Fingerprint {
+		return false, "init inputs changed"
+	}
+	// Another replica may have run a newer init, e.g. one that upgraded a provider
+	if fingerprint != ws.Status.InitFingerprint {
+		return false, "local installation differs from the last init by any replica"
+	}
+
+	return true, fmt.Sprintf("inputs unchanged since %s", marker.InitializedAt.UTC().Format(time.RFC3339))
+}
+
+func (r *WorkspaceReconciler) recordSuccessfulInit(ctx context.Context, ws *tfv1alphav1.Workspace, fingerprintEnvs map[string]string) {
+	log := logf.FromContext(ctx)
+
+	fingerprint, err := r.Tf.InitFingerprint(ws, fingerprintEnvs)
+	if err != nil {
+		log.Error(err, "failed to calculate init fingerprint, init will not be skipped next time", "workspace", ws.Name)
+		return
+	}
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+		old := ws.DeepCopy()
+		ws.Status.InitFingerprint = fingerprint
+		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	})
+	if err != nil {
+		log.Error(err, "failed to store init fingerprint, init will not be skipped next time", "workspace", ws.Name)
+		return
+	}
+
+	if err := r.Tf.WriteInitMarker(ws, fingerprint); err != nil {
+		log.Error(err, "failed to write init marker, init will not be skipped next time", "workspace", ws.Name)
+	}
+}
+
+func (r *WorkspaceReconciler) forceInitInterval() time.Duration {
+	if r.ForceInitInterval > 0 {
+		return r.ForceInitInterval
+	}
+	return defaultForceInitInterval
+}
+
+// An empty sum means init was skipped, a plan is then always requested so drift is still detected.
+func (r *WorkspaceReconciler) decidePlanAfterInit(ctx context.Context, ws *tfv1alphav1.Workspace, sum string) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+	var err error
+
 	workspaceUnchanged := ws.Status.ObservedGeneration == ws.Generation
-	checksumUnchanged := ws.Status.CurrentContentHash == sum && ws.Status.CurrentContentHash != ""
+	initSkipped := sum == ""
+	checksumUnchanged := !initSkipped && ws.Status.CurrentContentHash == sum && ws.Status.CurrentContentHash != ""
 	hasPlan := ws.Status.CurrentPlan != nil
 	isDeleting := !ws.DeletionTimestamp.IsZero()
 
@@ -395,7 +521,9 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 			return err
 		}
 		old := ws.DeepCopy()
-		ws.Status.CurrentContentHash = sum
+		if !initSkipped {
+			ws.Status.CurrentContentHash = sum
+		}
 		ws.Status.NewPlanNeeded = true
 
 		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
@@ -408,7 +536,7 @@ func (r *WorkspaceReconciler) handleRefreshDependencies(ctx context.Context, ws 
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
+func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
 	// Don't plan deleted workspaces
@@ -438,14 +566,14 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 	log.V(DebugLevel).Info("handle plan starting")
 	defer log.V(DebugLevel).Info("handle plan completed")
 
-	_ = r.updateWorkspaceStatus(ctx, ws, TFPhasePlanning, "Starting terraform plan", nil)
+	_ = r.updateWorkspaceStatus(ctx, ws, TFPhasePlanning, fmt.Sprintf("Starting %s plan", tool.Name()), nil)
 
 	planOutputCh, wg := r.streamOutput(ctx, ws, func(ws *tfv1alphav1.Workspace, output string) {
 		ws.Status.LastPlanOutput = output
 	})
 
-	changed, planOutput, err := r.executeTerraformPlan(ctx, tf, false, func(stdout, stderr string) {
-		output, _ := constructOutput(stdout, stderr, nil)
+	changed, planOutput, err := r.executeTerraformPlan(ctx, tool, false, func(stdout, stderr string) {
+		output, _ := constructOutput(tool.Name(), stdout, stderr, nil)
 		planOutputCh <- output
 	})
 
@@ -453,9 +581,9 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 	wg.Wait()
 
 	if err != nil {
-		log.Error(err, "failed to execute terraform plan", "workspace", ws.Name)
-		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFPlanEventReason, "Failed to execute terraform plan: %v", err)
-		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to execute terraform plan: %v", err), nil)
+		log.Error(err, "failed to execute "+tool.Name()+" plan", "workspace", ws.Name)
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFPlanEventReason, "Failed to execute %s plan: %v", tool.Name(), err)
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to execute %s plan: %v", tool.Name(), err), nil)
 		return ctrl.Result{}, err, true
 	}
 
@@ -493,12 +621,12 @@ func (r *WorkspaceReconciler) handlePlan(ctx context.Context, ws *tfv1alphav1.Wo
 		return ctrl.Result{}, fmt.Errorf("failed to update workspace status with current plan: %w", err), true
 	}
 
-	r.Recorder.Eventf(ws, v1.EventTypeNormal, TFPlanEventReason, "Terraform plan completed, changes: %t", changed)
+	r.Recorder.Eventf(ws, v1.EventTypeNormal, TFPlanEventReason, "%s plan completed, changes: %t", capitalize(tool.Name()), changed)
 
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
+func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
 	// Don't apply deleted workspaces
@@ -529,14 +657,14 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 	}
 
 	if ws.Status.HasChanges {
-		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseApplying, "Applying terraform changes", nil)
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseApplying, fmt.Sprintf("Applying %s changes", tool.Name()), nil)
 
 		applyOutputCh, wg := r.streamOutput(ctx, ws, func(ws *tfv1alphav1.Workspace, output string) {
 			ws.Status.LastApplyOutput = output
 		})
 
-		applyOutput, err := r.executeTerraformApply(ctx, tf, false, func(stdout, stderr string) {
-			output, _ := constructOutput(stdout, stderr, nil)
+		applyOutput, err := r.executeTerraformApply(ctx, tool, false, func(stdout, stderr string) {
+			output, _ := constructOutput(tool.Name(), stdout, stderr, nil)
 			applyOutputCh <- output
 		})
 
@@ -544,9 +672,9 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 		wg.Wait()
 
 		if err != nil {
-			log.Error(err, "failed to apply terraform", "workspace", ws.Name)
-			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFApplyEventReason, "Failed to apply terraform: %v", err)
-			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to apply terraform: %v", err), func(s *tfv1alphav1.WorkspaceStatus) {
+			log.Error(err, "failed to apply "+tool.Name(), "workspace", ws.Name)
+			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFApplyEventReason, "Failed to apply %s: %v", tool.Name(), err)
+			_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to apply %s: %v", tool.Name(), err), func(s *tfv1alphav1.WorkspaceStatus) {
 				s.LastApplyOutput = applyOutput
 			})
 
@@ -567,9 +695,9 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 		})
 
 		if ws.ManualApplyRequested() {
-			r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "Manual terraform apply completed successfully")
+			r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "Manual %s apply completed successfully", tool.Name())
 		} else {
-			r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "Terraform apply completed successfully")
+			r.Recorder.Eventf(ws, v1.EventTypeNormal, TFApplyEventReason, "%s apply completed successfully", capitalize(tool.Name()))
 		}
 	}
 
@@ -590,7 +718,7 @@ func (r *WorkspaceReconciler) handleApply(ctx context.Context, ws *tfv1alphav1.W
 	return ctrl.Result{}, nil, false
 }
 
-func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool, *tfexec.Terraform) {
+func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool, runner.IaCTool, map[string]string) {
 	log := logf.FromContext(ctx)
 	defer log.V(DebugLevel).Info("setup terraform completed")
 	log.V(DebugLevel).Info("setup terraform starting")
@@ -599,21 +727,21 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 	if err != nil {
 		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to setup workspace: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to setup workspace: %v", err), nil)
-		return ctrl.Result{}, err, true, nil
+		return ctrl.Result{}, err, true, nil, nil
 	}
 
-	envs, err := r.getEnvsForExecution(ctx, ws)
+	envs, secretDescriptors, err := r.getEnvsForExecution(ctx, ws)
 	if err != nil {
 		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to get envs for execution: %v", err)
 		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to get envs for execution: %v", err), nil)
-		return ctrl.Result{}, err, true, nil
+		return ctrl.Result{}, err, true, nil, nil
 	}
 
-	tf, terraformRCPath, err := r.Tf.GetTerraformForWorkspace(ctx, ws)
+	tool, terraformRCPath, err := r.Tf.GetIaCToolForWorkspace(ctx, ws)
 	if err != nil {
-		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to get terraform executable: %v", err)
-		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to get terraform executable: %v", err), nil)
-		return ctrl.Result{}, err, true, nil
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to get IaC tool executable: %v", err)
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to get IaC tool executable: %v", err), nil)
+		return ctrl.Result{}, err, true, nil, nil
 	}
 
 	envs["HOME"] = os.Getenv("HOME")
@@ -625,17 +753,21 @@ func (r *WorkspaceReconciler) setupTerraformForWorkspace(ctx context.Context, ws
 		envs["TF_CLI_CONFIG_FILE"] = terraformRCPath
 	}
 
-	err = tf.SetEnv(envs)
+	err = tool.SetEnv(envs)
 	if err != nil {
-		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to set terraform env: %v", err)
-		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to set terraform env: %v", err), nil)
-		return ctrl.Result{}, err, true, nil
+		r.Recorder.Eventf(ws, v1.EventTypeWarning, TFErrEventReason, "Failed to set %s env: %v", tool.Name(), err)
+		_ = r.updateWorkspaceStatus(ctx, ws, TFPhaseErrored, fmt.Sprintf("Failed to set %s env: %v", tool.Name(), err), nil)
+		return ctrl.Result{}, err, true, nil, nil
 	}
 
-	return ctrl.Result{}, nil, false, tf
+	// The fingerprint is stored in the workspace status, so it must not be derived from secret values
+	fingerprintEnvs := maps.Clone(envs)
+	maps.Copy(fingerprintEnvs, secretDescriptors)
+
+	return ctrl.Result{}, nil, false, tool, fingerprintEnvs
 }
 
-func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, ws *tfv1alphav1.Workspace, tf *tfexec.Terraform) (ctrl.Result, error, bool) {
+func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, ws *tfv1alphav1.Workspace, tool runner.IaCTool) (ctrl.Result, error, bool) {
 	log := logf.FromContext(ctx)
 
 	if ws.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(ws, tfv1alphav1.WorkspaceFinalizer) {
@@ -670,10 +802,10 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 	if ws.Spec.Destroy == tfv1alphav1.DestroyBehaviourAuto ||
 		ws.Spec.Destroy == tfv1alphav1.DestroyBehaviourManual ||
 		ws.Spec.Destroy == "" && !ws.Spec.PreventDestroy {
-		err := tf.Destroy(ctx)
+		err := tool.Destroy(ctx)
 		if err != nil {
-			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFDestroyEventReason, "Failed to destroy terraform resources: %v", err)
-			return ctrl.Result{}, fmt.Errorf("failed to destroy terraform resources: %w", err), true
+			r.Recorder.Eventf(ws, v1.EventTypeWarning, TFDestroyEventReason, "Failed to destroy %s resources: %v", tool.Name(), err)
+			return ctrl.Result{}, fmt.Errorf("failed to destroy %s resources: %w", tool.Name(), err), true
 		}
 	}
 
@@ -687,6 +819,41 @@ func (r *WorkspaceReconciler) handleDeletionAndFinalizers(ctx context.Context, w
 		if err := r.Update(ctx, ws); err != nil {
 			return ctrl.Result{}, err, true
 		}
+	}
+
+	return ctrl.Result{}, nil, false
+}
+
+func (r *WorkspaceReconciler) handleManualRetry(ctx context.Context, ws *tfv1alphav1.Workspace) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+
+	if !ws.ManualRetryRequested() {
+		return ctrl.Result{}, nil, false
+	}
+
+	log.V(DebugLevel).Info("manual retry requested, clearing backoff")
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+
+		old := ws.DeepCopy()
+		ws.Status.Backoff.NextRetryTime = nil
+		ws.Status.Backoff.RetryCount = 0
+		ws.Status.NextRefreshTimestamp = metav1.Now()
+
+		return r.Client.Status().Patch(ctx, ws, client.MergeFrom(old))
+	})
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to clear backoff during manual retry: %w", err), true
+	}
+
+	old := ws.DeepCopy()
+	delete(ws.Annotations, tfv1alphav1.ManualRetryAnnotation)
+	err = r.Client.Patch(ctx, ws, client.MergeFrom(old))
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to patch workspace during manual retry: %w", err), true
 	}
 
 	return ctrl.Result{}, nil, false
@@ -750,19 +917,19 @@ func (r *WorkspaceReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Man
 		Complete(r)
 }
 
-func (r *WorkspaceReconciler) executeTerraformPlan(ctx context.Context, tf *tfexec.Terraform, destroy bool, cb func(stdout, stderr string)) (bool, string, error) {
+func (r *WorkspaceReconciler) executeTerraformPlan(ctx context.Context, tool runner.IaCTool, destroy bool, cb func(stdout, stderr string)) (bool, string, error) {
 	var changed bool
 	var err error
 
-	runner.WithOutputStream(ctx, tf, func() {
-		changed, err = tf.Plan(ctx, tfexec.Destroy(destroy), tfexec.Out("plan.out"))
+	runner.WithOutputStream(ctx, tool, func() {
+		changed, err = tool.Plan(ctx, runner.WithDestroy(destroy), runner.WithOut("plan.out"))
 	}, cb)
 
 	if err != nil {
-		return false, "", fmt.Errorf("failed to plan terraform: %w", err)
+		return false, "", fmt.Errorf("failed to plan %s: %w", tool.Name(), err)
 	}
 
-	planOutput, err := tf.ShowPlanFileRaw(ctx, "plan.out")
+	planOutput, err := tool.ShowPlanFileRaw(ctx, "plan.out")
 	if err != nil {
 		return false, "", fmt.Errorf("failed to show plan file: %w", err)
 	}
@@ -771,14 +938,14 @@ func (r *WorkspaceReconciler) executeTerraformPlan(ctx context.Context, tf *tfex
 }
 
 // executeTerraformApply executes terraform apply or destroy command
-func (r *WorkspaceReconciler) executeTerraformApply(ctx context.Context, tf *tfexec.Terraform, destroy bool, cb func(stdout, stderr string)) (string, error) {
+func (r *WorkspaceReconciler) executeTerraformApply(ctx context.Context, tool runner.IaCTool, destroy bool, cb func(stdout, stderr string)) (string, error) {
 	var stdout, stderr string
 	var err error
-	runner.WithOutputStream(ctx, tf, func() {
+	runner.WithOutputStream(ctx, tool, func() {
 		if destroy {
-			err = tf.Destroy(ctx)
+			err = tool.Destroy(ctx)
 		} else {
-			err = tf.Apply(ctx)
+			err = tool.Apply(ctx)
 		}
 	}, func(so, se string) {
 		stdout = so
@@ -786,13 +953,13 @@ func (r *WorkspaceReconciler) executeTerraformApply(ctx context.Context, tf *tfe
 		cb(stdout, stderr)
 	})
 
-	return constructOutput(stdout, stderr, err)
+	return constructOutput(tool.Name(), stdout, stderr, err)
 }
 
-func constructOutput(stdout, stderr string, err error) (string, error) {
+func constructOutput(toolName, stdout, stderr string, err error) (string, error) {
 	var output string
 	if len(stdout) > 0 {
-		output += "=== TERRAFORM OUTPUT ===\n"
+		output += fmt.Sprintf("=== %s OUTPUT ===\n", strings.ToUpper(toolName))
 		output += stdout
 	}
 
@@ -800,7 +967,7 @@ func constructOutput(stdout, stderr string, err error) (string, error) {
 		if output != "" {
 			output += "\n"
 		}
-		output += "=== TERRAFORM DIAGNOSTICS ===\n"
+		output += fmt.Sprintf("=== %s DIAGNOSTICS ===\n", strings.ToUpper(toolName))
 		output += stderr
 	}
 
@@ -810,10 +977,17 @@ func constructOutput(stdout, stderr string, err error) (string, error) {
 	}
 
 	if output == "" && err != nil {
-		output = fmt.Sprintf("Terraform command failed: %v", err)
+		output = fmt.Sprintf("%s command failed: %v", capitalize(toolName), err)
 	}
 
 	return output, err
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // updateWorkspaceStatus updates the terraform execution status in the workspace
@@ -884,6 +1058,8 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alph
 			},
 			AutoApply:        ws.Spec.AutoApply,
 			TerraformVersion: ws.Spec.TerraformVersion,
+			Tool:             ws.Spec.Tool,
+			ToolVersion:      ws.Spec.ToolVersion,
 			Render:           ws.Status.CurrentRender,
 			Destroy:          destroy,
 		},
@@ -947,9 +1123,11 @@ func (r *WorkspaceReconciler) createPlanRecord(ctx context.Context, ws *tfv1alph
 	return plan, nil
 }
 
-// getEnvsForExecution gets environment variables for terraform execution
-func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1alphav1.Workspace) (map[string]string, error) {
+// getEnvsForExecution gets environment variables for terraform execution. The second return value maps the names of
+// secret-backed variables to a description of the secret that doesn't contain its value.
+func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1alphav1.Workspace) (map[string]string, map[string]string, error) {
 	envs := make(map[string]string)
+	secretDescriptors := make(map[string]string)
 
 	if ws.Spec.TFExec != nil && ws.Spec.TFExec.Env != nil {
 		for _, env := range ws.Spec.TFExec.Env {
@@ -964,7 +1142,7 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 				var cm v1.ConfigMap
 				err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: env.ConfigMapKeyRef.Name}, &cm)
 				if err != nil {
-					return nil, fmt.Errorf("failed to get configmap %s: %w", env.ConfigMapKeyRef.Name, err)
+					return nil, nil, fmt.Errorf("failed to get configmap %s: %w", env.ConfigMapKeyRef.Name, err)
 				}
 				if val, ok := cm.Data[env.ConfigMapKeyRef.Key]; ok {
 					envs[env.Name] = val
@@ -972,11 +1150,12 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 				}
 			}
 			if env.SecretKeyRef != nil {
-				value, err := r.getSecretFromRef(ctx, ws, env.SecretKeyRef)
+				value, descriptor, err := r.getSecretFromRef(ctx, ws, env.SecretKeyRef)
 				if err != nil {
-					return nil, fmt.Errorf("failed to get secret for env %s: %w", env.Name, err)
+					return nil, nil, fmt.Errorf("failed to get secret for env %s: %w", env.Name, err)
 				}
 				envs[env.Name] = value
+				secretDescriptors[env.Name] = descriptor
 				continue
 			}
 		}
@@ -987,7 +1166,7 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 			if ws.Spec.Authentication.AWS.ServiceAccountName != "" || ws.Spec.Authentication.AWS.RoleARN != "" {
 				tempTokenPath, err := r.setupAWSAuthentication(ctx, ws)
 				if err != nil {
-					return nil, fmt.Errorf("failed to setup AWS authentication: %w", err)
+					return nil, nil, fmt.Errorf("failed to setup AWS authentication: %w", err)
 				}
 
 				envs["AWS_WEB_IDENTITY_TOKEN_FILE"] = tempTokenPath
@@ -998,15 +1177,15 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 		if ws.Spec.Authentication.Tokens != nil {
 			wsPath := r.Tf.GetWorkspacePath(ws)
 			for _, token := range ws.Spec.Authentication.Tokens {
-				value, err := r.getSecretFromRef(ctx, ws, &token.SecretKeyRef)
+				value, _, err := r.getSecretFromRef(ctx, ws, &token.SecretKeyRef)
 				if err != nil {
-					return nil, fmt.Errorf("failed to get token for env %s: %w", token.FilePathEnv, err)
+					return nil, nil, fmt.Errorf("failed to get token for env %s: %w", token.FilePathEnv, err)
 				}
 
 				tokenFilePath := filepath.Join(wsPath, fmt.Sprintf("%s-token", strings.ToLower(token.FilePathEnv)))
 				err = os.WriteFile(tokenFilePath, []byte(value), 0600)
 				if err != nil {
-					return nil, fmt.Errorf("failed to write token file for env %s: %w", token.FilePathEnv, err)
+					return nil, nil, fmt.Errorf("failed to write token file for env %s: %w", token.FilePathEnv, err)
 				}
 
 				envs[token.FilePathEnv] = tokenFilePath
@@ -1014,7 +1193,7 @@ func (r *WorkspaceReconciler) getEnvsForExecution(ctx context.Context, ws *tfv1a
 		}
 	}
 
-	return envs, nil
+	return envs, secretDescriptors, nil
 }
 
 // setupAWSAuthentication creates temporary AWS token file for authentication
@@ -1052,10 +1231,10 @@ func (r *WorkspaceReconciler) setupAWSAuthentication(ctx context.Context, ws *tf
 	return path, nil
 }
 
-// formatValidationDiagnostics formats terraform validation diagnostics into a detailed error message
-func (r *WorkspaceReconciler) formatValidationDiagnostics(diagnostics []tfjson.Diagnostic) string {
+// formatValidationDiagnostics formats validation diagnostics into a detailed error message
+func (r *WorkspaceReconciler) formatValidationDiagnostics(toolName string, diagnostics []tfjson.Diagnostic) string {
 	var b strings.Builder
-	b.WriteString("Terraform validation failed with the following diagnostics:\n\n")
+	b.WriteString(fmt.Sprintf("%s validation failed with the following diagnostics:\n\n", capitalize(toolName)))
 	for i, diag := range diagnostics {
 		fmt.Fprintf(&b, "Diagnostic %d:\n", i+1)
 		fmt.Fprintf(&b, "  Severity: %s\n", diag.Severity)
@@ -1081,18 +1260,20 @@ func (r *WorkspaceReconciler) formatValidationDiagnostics(diagnostics []tfjson.D
 	return b.String()
 }
 
-func (r *WorkspaceReconciler) getSecretFromRef(ctx context.Context, ws *tfv1alphav1.Workspace, ref *tfv1alphav1.SecretKeySelector) (string, error) {
+func (r *WorkspaceReconciler) getSecretFromRef(ctx context.Context, ws *tfv1alphav1.Workspace, ref *tfv1alphav1.SecretKeySelector) (string, string, error) {
 	var secret v1.Secret
 	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: ref.Name}, &secret)
 	if err != nil {
-		return "", fmt.Errorf("failed to get secret %s: %w", ref.Name, err)
+		return "", "", fmt.Errorf("failed to get secret %s: %w", ref.Name, err)
 	}
 	value, ok := secret.Data[ref.Key]
 	if !ok {
-		return "", fmt.Errorf("key %s not found in secret %s", ref.Key, ref.Name)
+		return "", "", fmt.Errorf("key %s not found in secret %s", ref.Key, ref.Name)
 	}
 
-	return string(value), nil
+	descriptor := fmt.Sprintf("secret:%s/%s@%s/%s", ref.Name, ref.Key, secret.UID, secret.ResourceVersion)
+
+	return string(value), descriptor, nil
 }
 
 func (r *WorkspaceReconciler) cleanupOldPlans(ctx context.Context, ws *tfv1alphav1.Workspace) error {

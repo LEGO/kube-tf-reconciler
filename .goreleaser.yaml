@@ -6,6 +6,10 @@ builds:
     goos:
       - linux
       - darwin
+    # Without goarch, GoReleaser also builds 386. That is not a target for krec.
+    goarch:
+      - amd64
+      - arm64
     binary: krec
     ldflags:
       - -s -w -X github.com/LEGO/kube-tf-reconciler/cmd.version={{.Version}} -X github.com/LEGO/kube-tf-reconciler/cmd.commit={{.Commit}} -X github.com/LEGO/kube-tf-reconciler/cmd.date={{.Date}}
@@ -14,6 +18,9 @@ builds:
       - CGO_ENABLED=1
     goos:
       - windows
+    goarch:
+      - amd64
+      - arm64
     binary: krec
     ldflags:
       - -s -w -X github.com/LEGO/kube-tf-reconciler/cmd.version={{.Version}} -X github.com/LEGO/kube-tf-reconciler/cmd.commit={{.Commit}} -X github.com/LEGO/kube-tf-reconciler/cmd.date={{.Date}}

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	v1alpha1 "github.com/LEGO/kube-tf-reconciler/api/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,15 +40,21 @@ func listKubeContexts() ([]string, string, error) {
 	return names, config.CurrentContext, nil
 }
 
-// listNamespaces returns all namespace names visible to the client.
+// listNamespaces returns the names of namespaces that contain at least one
+// Workspace, so the UI only offers namespaces the user can actually work in.
 func listNamespaces(ctx context.Context, k8sClient client.Client) ([]string, error) {
-	var nsList corev1.NamespaceList
-	if err := k8sClient.List(ctx, &nsList); err != nil {
-		return nil, fmt.Errorf("listing namespaces: %w", err)
+	var list v1alpha1.WorkspaceList
+	if err := k8sClient.List(ctx, &list); err != nil {
+		return nil, fmt.Errorf("listing workspaces: %w", err)
 	}
-	names := make([]string, 0, len(nsList.Items))
-	for _, ns := range nsList.Items {
-		names = append(names, ns.Name)
+	seen := make(map[string]struct{}, len(list.Items))
+	names := make([]string, 0, len(list.Items))
+	for _, ws := range list.Items {
+		if _, ok := seen[ws.Namespace]; ok {
+			continue
+		}
+		seen[ws.Namespace] = struct{}{}
+		names = append(names, ws.Namespace)
 	}
 	sort.Strings(names)
 	return names, nil
@@ -71,19 +76,21 @@ type WorkspaceSummary struct {
 
 type WorkspaceDetail struct {
 	WorkspaceSummary
-	TerraformVersion       string       `json:"terraformVersion"`
-	AutoApply              bool         `json:"autoApply"`
-	Destroy                string       `json:"destroy"`
-	LastPlanOutput         string       `json:"lastPlanOutput"`
-	LastApplyOutput        string       `json:"lastApplyOutput"`
-	CurrentRender          string       `json:"currentRender"`
-	InitOutput             string       `json:"initOutput"`
-	RetryCount             int32        `json:"retryCount"`
-	LastErrorTime          string       `json:"lastErrorTime"`
-	LastExecutionTime      string       `json:"lastExecutionTime"`
-	HasManualApplyAnnotation   bool       `json:"hasManualApplyAnnotation"`
-	HasManualDestroyAnnotation bool       `json:"hasManualDestroyAnnotation"`
-	Plan                   *PlanSummary `json:"plan,omitempty"`
+	TerraformVersion           string       `json:"terraformVersion"`
+	Tool                       string       `json:"tool,omitempty"`
+	ToolVersion                string       `json:"toolVersion,omitempty"`
+	AutoApply                  bool         `json:"autoApply"`
+	Destroy                    string       `json:"destroy"`
+	LastPlanOutput             string       `json:"lastPlanOutput"`
+	LastApplyOutput            string       `json:"lastApplyOutput"`
+	CurrentRender              string       `json:"currentRender"`
+	InitOutput                 string       `json:"initOutput"`
+	RetryCount                 int32        `json:"retryCount"`
+	LastErrorTime              string       `json:"lastErrorTime"`
+	LastExecutionTime          string       `json:"lastExecutionTime"`
+	HasManualApplyAnnotation   bool         `json:"hasManualApplyAnnotation"`
+	HasManualDestroyAnnotation bool         `json:"hasManualDestroyAnnotation"`
+	Plan                       *PlanSummary `json:"plan,omitempty"`
 }
 
 type PlanSummary struct {
@@ -178,6 +185,7 @@ func listWorkspacePlans(ctx context.Context, k8sClient client.Client, namespace,
 var allowedAnnotations = map[string]bool{
 	v1alpha1.ManualApplyAnnotation:   true,
 	v1alpha1.ManualDestroyAnnotation: true,
+	v1alpha1.ManualRetryAnnotation:   true,
 }
 
 // patchWorkspaceAnnotation sets or removes an annotation on a workspace.
@@ -218,16 +226,18 @@ func fetchWorkspaceDetail(ctx context.Context, k8sClient client.Client, namespac
 			LastErrorMessage:     ws.Status.LastErrorMessage,
 			Deleting:             !ws.DeletionTimestamp.IsZero(),
 		},
-		TerraformVersion:  ws.Spec.TerraformVersion,
-		AutoApply:         ws.Spec.AutoApply,
-		Destroy:           string(ws.Spec.Destroy),
-		LastPlanOutput:    ws.Status.LastPlanOutput,
-		LastApplyOutput:   ws.Status.LastApplyOutput,
-		CurrentRender:     ws.Status.CurrentRender,
-		InitOutput:        ws.Status.InitOutput,
-		RetryCount:               ws.Status.Backoff.RetryCount,
-		LastErrorTime:            timeStr(ws.Status.LastErrorTime),
-		LastExecutionTime:        timeStr(ws.Status.LastExecutionTime),
+		TerraformVersion:           ws.Spec.TerraformVersion,
+		Tool:                       string(ws.Spec.Tool),
+		ToolVersion:                ws.Spec.ToolVersion,
+		AutoApply:                  ws.Spec.AutoApply,
+		Destroy:                    string(ws.Spec.Destroy),
+		LastPlanOutput:             ws.Status.LastPlanOutput,
+		LastApplyOutput:            ws.Status.LastApplyOutput,
+		CurrentRender:              ws.Status.CurrentRender,
+		InitOutput:                 ws.Status.InitOutput,
+		RetryCount:                 ws.Status.Backoff.RetryCount,
+		LastErrorTime:              timeStr(ws.Status.LastErrorTime),
+		LastExecutionTime:          timeStr(ws.Status.LastExecutionTime),
 		HasManualApplyAnnotation:   ws.Annotations[v1alpha1.ManualApplyAnnotation] == "true",
 		HasManualDestroyAnnotation: ws.Annotations[v1alpha1.ManualDestroyAnnotation] == "true",
 	}

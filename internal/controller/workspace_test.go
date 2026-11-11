@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +29,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -85,7 +88,7 @@ func TestWorkspaceController(t *testing.T) {
 	})
 	modHost.AddFileToModule("my-module", "main.tf", moduleStateServer.GetModule("my-module"))
 
-	rootDir := t.TempDir() // testutils.TestDataFolder() // Enable to better introspection into test data
+	rootDir := testutils.RunnerRoot(t) // testutils.TestDataFolder() // Enable to better introspection into test data
 	t.Logf("using root dir: %s", rootDir)
 	err = (&WorkspaceReconciler{
 		Client:   mgr.GetClient(),
@@ -112,13 +115,13 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.NotEmpty(t, ws.Status.LastPlanOutput)
 		assert.NotEmpty(t, ws.Status.InitOutput)
 
 		events := &v1.EventList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		var reasons []string
 		for _, e := range events.Items {
@@ -126,7 +129,7 @@ func TestWorkspaceController(t *testing.T) {
 		}
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListMatchN(plans, 1, planInPhase(tfv1alphav1.PlanPhaseApplied), plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.NoError(t, err)
 		require.Len(t, plans.Items, 1)
@@ -148,7 +151,7 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.AutoApply = false
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		ws.Annotations = map[string]string{
@@ -156,14 +159,15 @@ func TestWorkspaceController(t *testing.T) {
 		}
 		assert.NoError(t, k.Resources().Update(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			_, ok := object.GetAnnotations()[tfv1alphav1.ManualApplyAnnotation]
 			return !ok
 		}))
 		assert.NoError(t, err)
 
 		events := &v1.EventList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(events, 3, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
+		// The manual apply adds a 4th event, and the event recorder writes it asynchronously.
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(events, 4, testutils.EventOwnedBy(ws.Name)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		var reasons []string
 		for _, e := range events.Items {
@@ -171,7 +175,7 @@ func TestWorkspaceController(t *testing.T) {
 		}
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListMatchN(plans, 1, planInPhase(tfv1alphav1.PlanPhaseApplied), plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.NoError(t, err)
 		assert.Len(t, plans.Items, 1)
@@ -227,7 +231,7 @@ func TestWorkspaceController(t *testing.T) {
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.FileExists(t, filepath.Join(rootDir, "workspaces", ws.Namespace, ws.Name, "aws_token_file-token"))
 		assert.FileExists(t, filepath.Join(rootDir, "workspaces", ws.Namespace, ws.Name, "aws-token"))
@@ -243,18 +247,18 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.Module.Name = modName
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		// Not destroyed because we skipped
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
@@ -270,18 +274,18 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.Module.Name = modName
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		// Auto destroyed
 		assert.Equal(t, testutils.ModuleEventDestroy, moduleStateServer.CurrentStatus(modName))
@@ -297,17 +301,17 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.Module.Name = modName
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsTerraformMessage("Auto-destroy is disabled, awaiting manual destroy")), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsTerraformMessage("Auto-destroy is disabled, awaiting manual destroy")), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventApply, moduleStateServer.CurrentStatus(modName))
 
@@ -316,7 +320,7 @@ func TestWorkspaceController(t *testing.T) {
 		}
 		assert.NoError(t, k.Resources().Update(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
 		assert.NoError(t, err)
 		assert.Equal(t, testutils.ModuleEventDestroy, moduleStateServer.CurrentStatus(modName))
 	})
@@ -328,15 +332,15 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.AutoApply = false
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 0, plansForWs(ws)), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
 
 		assert.Len(t, plans.Items, 1)
 		assert.NoError(t, k.Resources().Delete(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceDeleted(ws), wait.WithContext(ctx))
 		assert.NoError(t, err)
 
 		for _, p := range plans.Items {
@@ -354,7 +358,7 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.PlanHistoryLimit = 1
 
 		assert.NoError(t, k.Resources().Create(ctx, ws))
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		ws.Spec.Module.Inputs = testutils.Json(map[string]interface{}{
@@ -362,11 +366,18 @@ func TestWorkspaceController(t *testing.T) {
 		})
 		assert.NoError(t, k.Resources().Update(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		plans := &tfv1alphav1.PlanList{}
-		err = wait.For(conditions.New(k.Resources()).ResourceListN(plans, 1, plansForWs(ws)), wait.WithContext(ctx))
+		// ObservedGeneration is set before cleanupOldPlans runs, so wait for the old plan to go.
+		err = testutils.WaitFor(func(ctx context.Context) (bool, error) {
+			if err := k.Resources().List(ctx, plans, plansForWs(ws)); err != nil {
+				return false, nil
+			}
+			return len(plans.Items) == 1 && plans.Items[0].Name == fmt.Sprintf("%s-2", ws.Name), nil
+		}, wait.WithContext(ctx))
+		assert.NoError(t, err)
 
 		assert.Len(t, plans.Items, 1)
 		assert.Equal(t, 2, int(ws.Generation))
@@ -380,7 +391,7 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			w := object.(*tfv1alphav1.Workspace)
 			return w.Status.TerraformPhase == TFPhaseErrored &&
 				w.Status.LastErrorMessage != "" &&
@@ -406,7 +417,7 @@ func TestWorkspaceController(t *testing.T) {
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			w := object.(*tfv1alphav1.Workspace)
 			return w.Status.TerraformPhase == TFPhaseErrored &&
 				w.Status.LastErrorMessage != "" &&
@@ -437,7 +448,7 @@ resource "random_pet" "name" {
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			w := object.(*tfv1alphav1.Workspace)
 			return w.Status.TerraformPhase == TFPhaseErrored &&
 				w.Status.LastErrorMessage != "" &&
@@ -472,7 +483,7 @@ resource "random_pet" "name" {
 		})
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, func(object k8s.Object) bool {
 			w := object.(*tfv1alphav1.Workspace)
 			return w.Status.TerraformPhase == TFPhaseErrored &&
 				w.Status.LastErrorMessage != "" &&
@@ -493,7 +504,7 @@ resource "random_pet" "name" {
 		ws.Spec.AutoApply = true
 		assert.NoError(t, k.Resources().Create(ctx, ws))
 
-		err = wait.For(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
+		err = testutils.WaitFor(conditions.New(k.Resources()).ResourceMatch(ws, testutils.WsCurrentGeneration))
 		assert.NoError(t, err)
 
 		assert.Equal(t, TFPhaseCompleted, ws.Status.TerraformPhase)
@@ -501,8 +512,99 @@ resource "random_pet" "name" {
 	})
 }
 
+func TestHandleManualRetry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
+
+	newReconciler := func(objs ...client.Object) (*WorkspaceReconciler, client.Client) {
+		builder := clientfake.NewClientBuilder().WithScheme(scheme)
+		for _, o := range objs {
+			builder = builder.WithStatusSubresource(o)
+		}
+		c := builder.WithObjects(objs...).Build()
+		return &WorkspaceReconciler{
+			Client:   c,
+			Scheme:   scheme,
+			Recorder: record.NewFakeRecorder(32),
+			leases:   &sync.Map{},
+		}, c
+	}
+
+	backoffWs := func(name string) *tfv1alphav1.Workspace {
+		ws := newWs(name, "some-source")
+		ws.Status.Backoff = tfv1alphav1.BackoffStatus{
+			NextRetryTime: &metav1.Time{Time: time.Now().Add(10 * time.Minute)},
+			RetryCount:    3,
+		}
+		return ws
+	}
+
+	t.Run("no-op when annotation absent", func(t *testing.T) {
+		ws := backoffWs("retry-noop")
+		r, c := newReconciler(ws)
+
+		_, err, ret := r.handleManualRetry(t.Context(), ws)
+		require.NoError(t, err)
+		assert.False(t, ret)
+
+		var got tfv1alphav1.Workspace
+		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(ws), &got))
+		// backoff untouched
+		assert.NotNil(t, got.Status.Backoff.NextRetryTime)
+		assert.Equal(t, int32(3), got.Status.Backoff.RetryCount)
+	})
+
+	t.Run("clears backoff and annotation when requested", func(t *testing.T) {
+		ws := backoffWs("retry-clears")
+		ws.Annotations = map[string]string{
+			tfv1alphav1.ManualRetryAnnotation: "true",
+		}
+		r, c := newReconciler(ws)
+
+		// metav1.Now() truncates to seconds, so compare against a second-truncated baseline
+		before := metav1.Now().Add(-time.Second)
+		_, err, ret := r.handleManualRetry(t.Context(), ws)
+		require.NoError(t, err)
+		// ret is false so reconciliation continues after clearing backoff
+		assert.False(t, ret)
+
+		var got tfv1alphav1.Workspace
+		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(ws), &got))
+
+		assert.Nil(t, got.Status.Backoff.NextRetryTime)
+		assert.Equal(t, int32(0), got.Status.Backoff.RetryCount)
+		assert.False(t, got.Status.NextRefreshTimestamp.IsZero(), "next refresh should be set")
+		assert.False(t, got.Status.NextRefreshTimestamp.Time.Before(before))
+
+		_, ok := got.Annotations[tfv1alphav1.ManualRetryAnnotation]
+		assert.False(t, ok, "manual retry annotation should be removed")
+	})
+
+	t.Run("returns error when workspace missing", func(t *testing.T) {
+		ws := backoffWs("retry-missing")
+		ws.Annotations = map[string]string{
+			tfv1alphav1.ManualRetryAnnotation: "true",
+		}
+		// reconciler with no objects: Get inside RetryOnConflict fails
+		r, _ := newReconciler()
+
+		_, err, ret := r.handleManualRetry(t.Context(), ws)
+		require.Error(t, err)
+		assert.True(t, ret)
+		assert.Contains(t, err.Error(), "failed to clear backoff during manual retry")
+	})
+}
+
 func plansForWs(ws *tfv1alphav1.Workspace) resources.ListOption {
 	return resources.WithLabelSelector(fmt.Sprintf("%s=%s", tfv1alphav1.WorkspacePlanLabel, ws.Name))
+}
+
+func planInPhase(phase tfv1alphav1.PlanPhase) func(k8s.Object) bool {
+	return func(object k8s.Object) bool {
+		plan, ok := object.(*tfv1alphav1.Plan)
+		return ok && plan.Status.Phase == phase
+	}
 }
 
 func newWs(name, moduleSource string) *tfv1alphav1.Workspace {
@@ -515,9 +617,9 @@ func newWs(name, moduleSource string) *tfv1alphav1.Workspace {
 			Backend: tfv1alphav1.BackendSpec{
 				Type: "local",
 			},
-			AutoApply:        true,
-			PreventDestroy:   true,
-			TerraformVersion: "1.13.3",
+			AutoApply:      true,
+			PreventDestroy: true,
+			ToolVersion:    "1.13.3",
 			ProviderSpecs: []tfv1alphav1.ProviderSpec{
 				{
 					Name:    "aws",
@@ -600,7 +702,7 @@ resource "random_pet" "name" {
 		WithObjects(freeWs, lockedWs, expiredWs, otherLease, expiredLease).
 		Build()
 
-	rootDir := t.TempDir()
+	rootDir := testutils.RunnerRoot(t)
 	reconciler := &WorkspaceReconciler{
 		Client:   client,
 		Scheme:   scheme,
@@ -734,4 +836,376 @@ resource "random_pet" "name" {
 		}, &plan)
 		assert.NoError(t, err)
 	})
+}
+
+func pinnedGitModule(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`
+resource "random_pet" "name" {
+  length = 2
+}
+`), 0644))
+
+	git := func(args ...string) string {
+		cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "module")
+	sha := git("rev-parse", "HEAD")
+
+	return fmt.Sprintf("git::file://%s?ref=%s", dir, sha)
+}
+
+func TestInitSkipDecision(t *testing.T) {
+	const pinned = "git::https://github.com/LEGO/repo.git?ref=605beb1ed65a00b79edbcb74ff851d92399f598d"
+	modulesJSON := `{"Modules":[{"Key":"","Source":"","Dir":"."},{"Key":"my-module","Source":"` + pinned + `","Dir":".terraform/modules/my-module"}]}`
+	envs := map[string]string{"FOO": "bar"}
+
+	setup := func(t *testing.T) (*WorkspaceReconciler, *tfv1alphav1.Workspace) {
+		r := &WorkspaceReconciler{Tf: runner.New(t.TempDir())}
+		ws := newWs("skip", pinned)
+		ws.Generation = 2
+		ws.Status.ObservedGeneration = 2
+		ws.Status.TerraformPhase = TFPhaseCompleted
+		ws.Status.ValidRender = true
+
+		wsPath := r.Tf.GetWorkspacePath(ws)
+		require.NoError(t, os.MkdirAll(filepath.Join(wsPath, ".terraform", "modules", "my-module"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(wsPath, "main.tf"), []byte("module {}"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(wsPath, ".terraform", "modules", "modules.json"), []byte(modulesJSON), 0644))
+
+		fp, err := r.Tf.InitFingerprint(ws, envs)
+		require.NoError(t, err)
+		require.NoError(t, r.Tf.WriteInitMarker(ws, fp))
+		ws.Status.InitFingerprint = fp
+		return r, ws
+	}
+
+	t.Run("skips when nothing changed", func(t *testing.T) {
+		r, ws := setup(t)
+		skip, reason := r.initSkipDecision(ws, envs, false)
+		assert.True(t, skip, reason)
+	})
+
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, r *WorkspaceReconciler, ws *tfv1alphav1.Workspace)
+		envs   map[string]string
+		force  bool
+		reason string
+	}{
+		{name: "manual retry", reason: "manual retry", force: true},
+		{name: "deleting", reason: "deleted", mutate: func(_ *testing.T, _ *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			ws.DeletionTimestamp = ptr.To(metav1.Now())
+		}},
+		{name: "spec changed", reason: "spec changed", mutate: func(_ *testing.T, _ *WorkspaceReconciler, ws *tfv1alphav1.Workspace) { ws.Generation = 3 }},
+		{name: "previous run errored", reason: "did not complete", mutate: func(_ *testing.T, _ *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			ws.Status.TerraformPhase = TFPhaseErrored
+		}},
+		{name: "previous run interrupted", reason: "did not complete", mutate: func(_ *testing.T, _ *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			ws.Status.TerraformPhase = TFPhasePlanning
+		}},
+		{name: "backing off", reason: "did not complete", mutate: func(_ *testing.T, _ *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			ws.Status.Backoff.RetryCount = 1
+		}},
+		{name: "invalid render", reason: "did not complete", mutate: func(_ *testing.T, _ *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			ws.Status.ValidRender = false
+		}},
+		{name: "floating root module", reason: "not pinned", mutate: func(_ *testing.T, _ *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			ws.Spec.Module.Source = "git::https://github.com/LEGO/repo.git?ref=main"
+		}},
+		{name: "no marker", reason: "no previous successful init", mutate: func(t *testing.T, r *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			require.NoError(t, r.Tf.RemoveInitMarker(ws))
+		}},
+		{name: "operator restarted", reason: "operator start", mutate: func(_ *testing.T, r *WorkspaceReconciler, _ *tfv1alphav1.Workspace) {
+			r.Tf.BootID = "another-process"
+		}},
+		{name: "force init interval elapsed", reason: "older than", mutate: func(_ *testing.T, r *WorkspaceReconciler, _ *tfv1alphav1.Workspace) {
+			r.ForceInitInterval = time.Nanosecond
+		}},
+		{name: "env changed", reason: "inputs changed", envs: map[string]string{"FOO": "baz"}},
+		{name: "main.tf changed", reason: "inputs changed", mutate: func(t *testing.T, r *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			require.NoError(t, os.WriteFile(filepath.Join(r.Tf.GetWorkspacePath(ws), "main.tf"), []byte("changed"), 0644))
+		}},
+		{name: "another replica ran a newer init", reason: "differs from the last init by any replica", mutate: func(_ *testing.T, _ *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			ws.Status.InitFingerprint = "from-another-pod"
+		}},
+		{name: "no fingerprint in status (upgrade from older operator)", reason: "differs from the last init by any replica", mutate: func(_ *testing.T, _ *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			ws.Status.InitFingerprint = ""
+		}},
+		{name: ".terraform removed", reason: "cannot verify installed modules", mutate: func(t *testing.T, r *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			require.NoError(t, os.RemoveAll(filepath.Join(r.Tf.GetWorkspacePath(ws), ".terraform")))
+		}},
+		{name: "nested floating module", reason: "nested module", mutate: func(t *testing.T, r *WorkspaceReconciler, ws *tfv1alphav1.Workspace) {
+			wsPath := r.Tf.GetWorkspacePath(ws)
+			nested := `{"Modules":[{"Key":"","Source":"","Dir":"."},{"Key":"my-module","Source":"` + pinned + `","Dir":".terraform/modules/my-module"},{"Key":"my-module.x","Source":"git::https://github.com/LEGO/x.git","Dir":".terraform/modules/my-module"}]}`
+			require.NoError(t, os.WriteFile(filepath.Join(wsPath, ".terraform", "modules", "modules.json"), []byte(nested), 0644))
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, ws := setup(t)
+			if tt.mutate != nil {
+				tt.mutate(t, r, ws)
+			}
+			e := envs
+			if tt.envs != nil {
+				e = tt.envs
+			}
+			skip, reason := r.initSkipDecision(ws, e, tt.force)
+			assert.False(t, skip)
+			assert.Contains(t, reason, tt.reason)
+		})
+	}
+}
+
+func TestSkipInitReconciliation(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required")
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
+
+	ws := newWs("test-skip-init", pinnedGitModule(t))
+	ws.Generation = 1
+	ws.Spec.AutoApply = false
+	ws.Spec.ProviderSpecs = []tfv1alphav1.ProviderSpec{{Name: "random", Version: "3.7.2", Source: "hashicorp/random"}}
+
+	secret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: ws.Namespace},
+		Data:       map[string][]byte{"password": []byte("hunter2")},
+	}
+	ws.Spec.TFExec = &tfv1alphav1.TFSpec{Env: []tfv1alphav1.EnvVar{
+		{Name: "TEST_PASSWORD", SecretKeyRef: &tfv1alphav1.SecretKeySelector{Name: "creds", Key: "password"}},
+	}}
+
+	c := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(ws, &tfv1alphav1.Plan{}).WithObjects(ws, secret).Build()
+	rootDir := testutils.RunnerRoot(t)
+	r := &WorkspaceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+		Tf:       runner.New(rootDir),
+		Renderer: render.NewFileRender(rootDir),
+		leases:   &sync.Map{},
+	}
+
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ws)}
+	get := func() *tfv1alphav1.Workspace {
+		var got tfv1alphav1.Workspace
+		require.NoError(t, c.Get(t.Context(), req.NamespacedName, &got))
+		return &got
+	}
+	reconcileRefresh := func() *tfv1alphav1.Workspace {
+		cur := get()
+		old := cur.DeepCopy()
+		cur.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(-time.Second))
+		require.NoError(t, c.Status().Patch(t.Context(), cur, client.MergeFrom(old)))
+		_, err := r.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+		return get()
+	}
+	planOutputEvents := func() int {
+		n := 0
+		for {
+			select {
+			case e := <-r.Recorder.(*record.FakeRecorder).Events:
+				if strings.Contains(e, TFPlanEventReason) {
+					n++
+				}
+			default:
+				return n
+			}
+		}
+	}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	first := get()
+	require.Equal(t, TFPhaseCompleted, first.Status.TerraformPhase, first.Status.TerraformMessage)
+	assert.Contains(t, first.Status.InitOutput, "Terraform has been successfully initialized")
+	assert.NotEmpty(t, first.Status.CurrentContentHash)
+	assert.Equal(t, 1, planOutputEvents(), "first reconcile plans")
+
+	second := reconcileRefresh()
+	require.Equal(t, TFPhaseCompleted, second.Status.TerraformPhase, second.Status.TerraformMessage)
+	assert.Contains(t, second.Status.InitOutput, "init skipped")
+	assert.Equal(t, first.Status.CurrentContentHash, second.Status.CurrentContentHash, "content hash is kept when init is skipped")
+	assert.Equal(t, 1, planOutputEvents(), "plan still runs when init is skipped, so out-of-band changes are detected")
+
+	var currentSecret v1.Secret
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(secret), &currentSecret))
+	currentSecret.Data["password"] = []byte("rotated")
+	require.NoError(t, c.Update(t.Context(), &currentSecret))
+	rotated := reconcileRefresh()
+	assert.Contains(t, rotated.Status.InitOutput, "Terraform has been successfully initialized", "rewriting a referenced secret forces a full init")
+	assert.Equal(t, 1, planOutputEvents())
+
+	_, err, ret, _, fingerprintEnvs := r.setupTerraformForWorkspace(t.Context(), get())
+	require.NoError(t, err)
+	require.False(t, ret)
+	assert.NotContains(t, fingerprintEnvs["TEST_PASSWORD"], "rotated")
+	assert.Contains(t, fingerprintEnvs["TEST_PASSWORD"], "creds/password")
+
+	cur := get()
+	cur.Spec.Module.Inputs = nil
+	cur.Spec.TerraformRC = "# changed"
+	cur.Generation = 2
+	require.NoError(t, c.Update(t.Context(), cur))
+
+	third := reconcileRefresh()
+	require.Equal(t, TFPhaseCompleted, third.Status.TerraformPhase, third.Status.TerraformMessage)
+	assert.Contains(t, third.Status.InitOutput, "Terraform has been successfully initialized")
+	assert.Equal(t, 1, planOutputEvents())
+
+	fourth := reconcileRefresh()
+	assert.Contains(t, fourth.Status.InitOutput, "init skipped")
+	assert.Equal(t, 1, planOutputEvents())
+}
+
+// Each reconciler simulates a replica with its own local workspace directory.
+func TestSkipInitAcrossPods(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required")
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
+
+	ws := newWs("test-skip-init-pods", pinnedGitModule(t))
+	ws.Generation = 1
+	ws.Spec.AutoApply = false
+	ws.Spec.ProviderSpecs = []tfv1alphav1.ProviderSpec{{Name: "random", Version: "3.7.2", Source: "hashicorp/random"}}
+
+	c := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(ws, &tfv1alphav1.Plan{}).WithObjects(ws).Build()
+	newPod := func() *WorkspaceReconciler {
+		rootDir := testutils.RunnerRoot(t)
+		return &WorkspaceReconciler{
+			Client:   c,
+			Scheme:   scheme,
+			Recorder: record.NewFakeRecorder(100),
+			Tf:       runner.New(rootDir),
+			Renderer: render.NewFileRender(rootDir),
+			leases:   &sync.Map{},
+		}
+	}
+	podA, podB := newPod(), newPod()
+
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ws)}
+	get := func() *tfv1alphav1.Workspace {
+		var got tfv1alphav1.Workspace
+		require.NoError(t, c.Get(t.Context(), req.NamespacedName, &got))
+		return &got
+	}
+	refreshOn := func(r *WorkspaceReconciler) *tfv1alphav1.Workspace {
+		cur := get()
+		old := cur.DeepCopy()
+		cur.Status.NextRefreshTimestamp = metav1.NewTime(time.Now().Add(-time.Second))
+		require.NoError(t, c.Status().Patch(t.Context(), cur, client.MergeFrom(old)))
+		_, err := r.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+		got := get()
+		require.Equal(t, TFPhaseCompleted, got.Status.TerraformPhase, got.Status.TerraformMessage)
+
+		planned := false
+		for done := false; !done; {
+			select {
+			case e := <-r.Recorder.(*record.FakeRecorder).Events:
+				planned = planned || strings.Contains(e, TFPlanEventReason+" Terraform plan completed")
+			default:
+				done = true
+			}
+		}
+		require.True(t, planned, "every reconciliation must run a successful plan")
+		return got
+	}
+	const fullInit = "Terraform has been successfully initialized"
+
+	got := refreshOn(podA)
+	assert.Contains(t, got.Status.InitOutput, fullInit, "pod A: first reconcile")
+
+	_, err := os.Stat(filepath.Join(podB.Tf.GetWorkspacePath(ws), ".terraform"))
+	require.True(t, os.IsNotExist(err))
+	got = refreshOn(podB)
+	assert.Contains(t, got.Status.InitOutput, fullInit, "pod B: no local state, must run a full init")
+
+	got = refreshOn(podA)
+	assert.Contains(t, got.Status.InitOutput, "init skipped", "pod A: local state still valid")
+
+	podB.ForceInitInterval = time.Nanosecond
+	got = refreshOn(podB)
+	assert.Contains(t, got.Status.InitOutput, fullInit, "pod B: force init interval elapsed")
+	podB.ForceInitInterval = 0
+	cur := get()
+	old := cur.DeepCopy()
+	cur.Status.InitFingerprint = "fingerprint-of-upgraded-lock-file-on-pod-b"
+	require.NoError(t, c.Status().Patch(t.Context(), cur, client.MergeFrom(old)))
+	got = refreshOn(podA)
+	assert.Contains(t, got.Status.InitOutput, fullInit, "pod A: another replica has a newer installation")
+	got = refreshOn(podA)
+	assert.Contains(t, got.Status.InitOutput, "init skipped", "pod A: back in sync")
+
+	cur = get()
+	cur.Spec.TerraformRC = "# changed"
+	cur.Generation = 2
+	require.NoError(t, c.Update(t.Context(), cur))
+	got = refreshOn(podB)
+	assert.Contains(t, got.Status.InitOutput, fullInit, "pod B: spec changed")
+
+	got = refreshOn(podA)
+	assert.Contains(t, got.Status.InitOutput, fullInit, "pod A: local init is for an older generation")
+
+	require.NoError(t, os.RemoveAll(filepath.Join(podA.Tf.GetWorkspacePath(ws), ".terraform")))
+	got = refreshOn(podA)
+	assert.Contains(t, got.Status.InitOutput, fullInit, "pod A: modules missing locally")
+}
+
+func TestGetEnvsForExecutionSecretDescriptors(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+	require.NoError(t, tfv1alphav1.AddToScheme(scheme))
+
+	const secretValue = "super-secret-value"
+	secret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "default", UID: "uid-1"},
+		Data:       map[string][]byte{"password": []byte(secretValue)},
+	}
+	c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	r := &WorkspaceReconciler{Client: c, Scheme: scheme, Tf: runner.New(t.TempDir())}
+
+	ws := newWs("secret-envs", "some-source")
+	ws.Spec.TFExec = &tfv1alphav1.TFSpec{Env: []tfv1alphav1.EnvVar{
+		{Name: "PLAIN", Value: "plain-value"},
+		{Name: "PASSWORD", SecretKeyRef: &tfv1alphav1.SecretKeySelector{Name: "creds", Key: "password"}},
+	}}
+
+	envs, descriptors, err := r.getEnvsForExecution(t.Context(), ws)
+	require.NoError(t, err)
+	assert.Equal(t, secretValue, envs["PASSWORD"])
+	assert.Equal(t, "plain-value", envs["PLAIN"])
+	require.Contains(t, descriptors, "PASSWORD")
+	assert.NotContains(t, descriptors, "PLAIN")
+	assert.NotContains(t, descriptors["PASSWORD"], secretValue)
+	assert.Contains(t, descriptors["PASSWORD"], "creds/password")
+	assert.Contains(t, descriptors["PASSWORD"], "uid-1")
+
+	var current v1.Secret
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(secret), &current))
+	current.Data["password"] = []byte("rotated")
+	require.NoError(t, c.Update(t.Context(), &current))
+
+	_, rotated, err := r.getEnvsForExecution(t.Context(), ws)
+	require.NoError(t, err)
+	assert.NotEqual(t, descriptors["PASSWORD"], rotated["PASSWORD"], "descriptor must change when the secret is written")
 }

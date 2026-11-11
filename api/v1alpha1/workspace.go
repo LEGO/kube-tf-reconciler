@@ -7,6 +7,16 @@ import (
 
 type DestroyBehaviour string
 
+// Tool is the IaC tool used to plan and apply the workspace
+type Tool string
+
+const (
+	// ToolTerraform uses the terraform CLI
+	ToolTerraform Tool = "terraform"
+	// ToolOpenTofu uses the tofu CLI
+	ToolOpenTofu Tool = "opentofu"
+)
+
 // These are valid destroy behaviours. "DestroyBehaviourSkip" means nothing is
 // done when a Workspace is deleted. "DestroyBehaviourAuto" means that a
 // `terraform destroy` action is automatically invoked when the resource is
@@ -22,6 +32,7 @@ const (
 const (
 	ManualApplyAnnotation   = "tf-reconcile.lego.com/manual-apply"
 	ManualDestroyAnnotation = "tf-reconcile.lego.com/manual-destroy"
+	ManualRetryAnnotation   = "tf-reconcile.lego.com/manual-retry"
 	WorkspacePlanLabel      = "tf-reconcile.lego.com/workspace"
 	WorkspaceFinalizer      = "tf-reconcile.lego.com/finalizer"
 )
@@ -159,8 +170,19 @@ type AuthenticationSpec struct {
 // WorkspaceSpec defines the desired state of Workspace.
 type WorkspaceSpec struct {
 	// TerraformVersion is the version of terraform to use
-	// +kubebuilder:validation:Required
-	TerraformVersion string `json:"terraformVersion"`
+	// Deprecated: use ToolVersion instead
+	// +kubebuilder:validation:Optional
+	TerraformVersion string `json:"terraformVersion,omitempty"`
+
+	// Tool is the IaC tool to use, either terraform or opentofu
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=terraform
+	// +kubebuilder:validation:Enum=terraform;opentofu
+	Tool Tool `json:"tool,omitempty"`
+
+	// ToolVersion is the version of the IaC tool to use
+	// +kubebuilder:validation:Optional
+	ToolVersion string `json:"toolVersion,omitempty"`
 
 	// Backend is the backend configuration for the workspace
 	// +kubebuilder:validation:Required
@@ -239,6 +261,9 @@ type WorkspaceStatus struct {
 	// changes in modules that are not evident in the workspace spec (e.g. git modules)
 	// +kubebuilder:validation:Optional
 	CurrentContentHash string `json:"currentContentHash"`
+	// InitFingerprint identifies the last successful init by any replica
+	// +kubebuilder:validation:Optional
+	InitFingerprint string `json:"initFingerprint,omitempty"`
 	// NextRefreshTimestamp is the next time the workspace will be refreshed
 	// +kubebuilder:validation:Optional
 	NextRefreshTimestamp metav1.Time `json:"nextRefreshTimestamp"`
@@ -315,6 +340,11 @@ func (w *Workspace) ManualApplyRequested() bool {
 
 func (w *Workspace) ManualDestroyRequested() bool {
 	_, ok := w.Annotations[ManualDestroyAnnotation]
+	return ok
+}
+
+func (w *Workspace) ManualRetryRequested() bool {
+	_, ok := w.Annotations[ManualRetryAnnotation]
 	return ok
 }
 

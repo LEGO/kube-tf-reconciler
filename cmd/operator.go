@@ -65,6 +65,8 @@ var operatorCmd = &cobra.Command{
 
 			Tf:       runner.New(cfg.WorkspacePath),
 			Renderer: render.NewFileRender(cfg.WorkspacePath),
+
+			ForceInitInterval: cfg.ForceInitInterval,
 		}
 
 		if err = reconciler.SetupWithManager(cmd.Context(), mgr); err != nil {
