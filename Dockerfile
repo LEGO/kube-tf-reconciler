@@ -1,6 +1,4 @@
-FROM golang:1.27.3-alpine3.24 AS build
-
-RUN apk add --no-cache ca-certificates && update-ca-certificates
+FROM artifactory.novus.legogroup.io/cgr/go:1.27.3@sha256:97e7726d4e7d3b077694a2c8eb44f5c8a77ce1a66aefa8653e228a99a2011102 AS build
 
 WORKDIR /src
 
@@ -17,12 +15,9 @@ ARG DATE
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
 
-FROM alpine:3.24 AS krec
+FROM artifactory.novus.legogroup.io/cgr/chainguard-base:latest@sha256:213aad08918741464ce15c6e9a1254ccb3926e0187dd20314132108c6837efd5 AS krec
 
-# Upgrade base packages and require patched brotli-libs (CVE-2026-111497, pulled in via git -> libcurl).
-# The version constraint makes the build fail instead of silently shipping a vulnerable image.
-RUN apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates git openssh-client 'brotli-libs>=1.2.1-r0'
+RUN apk add --no-cache git openssh-client
 
 COPY --from=build /src/krec /usr/local/bin/krec
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
