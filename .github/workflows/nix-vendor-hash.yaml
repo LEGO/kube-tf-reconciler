@@ -1,0 +1,74 @@
+name: Nix vendorHash drift
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - go.mod
+      - go.sum
+      - flake.nix
+      - flake.lock
+      - .github/workflows/nix-vendor-hash.yaml
+  workflow_dispatch:
+
+concurrency:
+  group: nix-vendor-hash
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  vendor-hash:
+    name: Recompute vendorHash
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v32
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run nix-update
+        run: |
+          nix develop --command nix-update -- --flake  --version=skip --override-filename flake.nix krec
+
+      - name: Detect drift
+        id: drift
+        run: |
+          if git diff --quiet -- flake.nix; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No drift: the committed vendorHash is already correct."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Drift detected, vendorHash was rewritten:"
+            git --no-pager diff -- flake.nix
+          fi
+
+      - name: Verify the patched flake builds
+        if: steps.drift.outputs.changed == 'true'
+        run: nix build --no-link .#krec
+
+      - name: Open pull request
+        if: steps.drift.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: automation/nix-vendor-hash
+          delete-branch: true
+          add-paths: flake.nix
+          commit-message: "chore(deps): update flake vendorHash"
+          title: "chore(deps): update flake vendorHash"
+          body: |-
+            The Go module graph no longer matches the `vendorHash` pinned in
+            `flake.nix`, so `nix run github:LEGO/kube-tf-reconciler` fails
+            until the hash is refreshed. A dependency bump (`go.mod` /
+            `go.sum`) is the usual cause.
+
+            Triggered by ${{ github.sha }} in
+            [run ${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
