@@ -36,7 +36,7 @@ jobs:
 
       - name: Run nix-update
         run: |
-          nix develop --command nix-update -- --flake  --version=skip --override-filename flake.nix krec
+          nix develop --command nix-update --flake --version=skip krec
 
       - name: Detect drift
         id: drift
