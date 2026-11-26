@@ -8,7 +8,7 @@ registries:
   artifactory:
     type: docker-registry
     url: https://artifactory.novus.legogroup.io
-    jfrog-oidc-provider-name: "novus-api"
+    jfrog-oidc-provider-name: "kube-tf-reconciler"
     audience: lego-github
 updates:
   - package-ecosystem: "gomod"
