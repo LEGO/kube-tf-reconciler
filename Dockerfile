@@ -15,7 +15,7 @@ ARG DATE
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
 
-FROM artifactory.novus.legogroup.io/cgr/chainguard-base:latest@sha256:213aad08918741464ce15c6e9a1254ccb3926e0187dd20314132108c6837efd5 AS krec
+FROM artifactory.novus.legogroup.io/cgr/chainguard-base:latest@sha256:fc3111d7faaf400a76cc3ef03e9cd020c2f99c6ec51e8d7e8832d916e8b8baaa AS krec
 
 RUN apk add --no-cache git openssh-client
 
