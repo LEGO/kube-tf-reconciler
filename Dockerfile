@@ -1,4 +1,4 @@
-FROM artifactory.novus.legogroup.io/cgr/go:1.27.3@sha256:97e7726d4e7d3b077694a2c8eb44f5c8a77ce1a66aefa8653e228a99a2011102 AS build
+FROM artifactory.novus.legogroup.io/cgr/go:1.27.4@sha256:675a784977718324348f231efc11b1d2deb247abe7b7e74e4a927b6402215e3d AS build
 
 WORKDIR /src
 
