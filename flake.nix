@@ -27,7 +27,7 @@
         # How to get the vendorHash:
         # Option 1: set to pkgs.lib.fakeHash and paste the value at build time
         # Option 2: go mod vendor && nix hash path --sri ./vendor
-        vendorHash = "sha256-omlzJCSVypolUqwIM1FNfSEfxLCr7GncWSXZu/f4VV4=";
+        vendorHash = "sha256-ftFoUDJmyJEZwc0xKzph7+yapgb7GjVRXfgk6dp9NHI=";
 
         env.CGO_ENABLED = "0";
 
