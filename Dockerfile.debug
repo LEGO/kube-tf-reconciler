@@ -1,4 +1,4 @@
-FROM artifactory.novus.legogroup.io/cgr/go:1.27.4@sha256:675a784977718324348f231efc11b1d2deb247abe7b7e74e4a927b6402215e3d AS build
+FROM artifactory.novus.legogroup.io/cgr/go:1.27.4@sha256:92b60833a7a1e6f4d5bc7381a5c2126f215643158f2ba2a64aaeed904de29790 AS build
 
 # Install Delve debugger from source
 RUN go install github.com/go-delve/delve/cmd/dlv@latest
