@@ -1,0 +1,115 @@
+name: Nix vendorHash drift
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - go.mod
+      - go.sum
+      - flake.nix
+      - flake.lock
+      - .github/workflows/nix-vendor-hash.yaml
+  workflow_dispatch:
+
+concurrency:
+  group: nix-vendor-hash
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  vendor-hash:
+    name: Recompute vendorHash
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v32
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run nix-update
+        run: |
+          nix develop --command nix-update --flake --version=skip krec
+
+      - name: Detect drift
+        id: drift
+        run: |
+          if git diff --quiet -- flake.nix; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No drift: the committed vendorHash is already correct."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Drift detected, vendorHash was rewritten:"
+            git --no-pager diff -- flake.nix
+          fi
+
+      - name: Verify the patched flake builds
+        if: steps.drift.outputs.changed == 'true'
+        run: nix build --no-link .#krec
+
+      - name: Push the vendorHash branch
+        if: steps.drift.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b automation/nix-vendor-hash
+          # Stage flake.nix only: the docs workflow triggers on pushes to
+          # non-main branches, and a flake.nix-only commit keeps it quiet.
+          git add flake.nix
+          git commit -m "chore(deps): update flake vendorHash"
+          # An earlier run may have left this branch behind, so overwrite it.
+          git push --force origin automation/nix-vendor-hash
+
+      - name: Open pull request
+        if: steps.drift.outputs.changed == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |-
+            const head = "automation/nix-vendor-hash";
+            const runUrl = [
+              process.env.GITHUB_SERVER_URL,
+              context.repo.owner,
+              context.repo.repo,
+              "actions/runs",
+              context.runId,
+            ].join("/");
+
+            const open = await github.rest.pulls.list({
+              ...context.repo,
+              state: "open",
+              head: `${context.repo.owner}:${head}`,
+            });
+
+            if (open.data.length > 0) {
+              core.info(`Pull request #${open.data[0].number} already open.`);
+              return;
+            }
+
+            const body = [
+              "The Go module graph no longer matches the `vendorHash` pinned in",
+              "`flake.nix`, so `nix run github:LEGO/kube-tf-reconciler` fails",
+              "until the hash is refreshed. A dependency bump (`go.mod` /",
+              "`go.sum`) is the usual cause. This PR update the vendorHash to",
+              "make sure that nix builds are working and reproducible",
+              "",
+              `Triggered by ${context.sha} in`,
+              `[run ${context.runId}](${runUrl}).`,
+            ].join("\n");
+
+            const created = await github.rest.pulls.create({
+              ...context.repo,
+              head,
+              base: "main",
+              title: "chore(deps): update flake vendorHash",
+              body,
+            });
+
+            core.info(`Opened pull request #${created.data.number}`);
+            core.info(created.data.html_url);

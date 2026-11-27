@@ -64,6 +64,7 @@
           go_latest
           kubectl
           kind
+          nix-update
         ];
       };
     });
