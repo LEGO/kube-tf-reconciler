@@ -5,6 +5,7 @@ on:
     paths:
       - "**/*.go"
       - go.mod
+      - go.sum
       - .github/workflows/go-test.yaml
   push:
     branches:
@@ -12,6 +13,7 @@ on:
     paths:
       - "**/*.go"
       - go.mod
+      - go.sum
       - .github/workflows/go-test.yaml
 
 env:
