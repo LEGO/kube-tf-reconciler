@@ -19,6 +19,8 @@ ARG DATE
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags "-X cmd.commit=$SHA -X cmd.date=$DATE" -o krec main.go
 
+# git-base is a custom assembly image based on cgr/static with git and openssh-client added on top.
+# the cgr/git image includes much more, which would bloat the size and dependency footprint
 FROM artifactory.novus.legogroup.io/cgr/git-base@sha256:5c6cfb71874cad8eb32f963f4c0e711bd3bbed3f7ae68b60e87345b1de4e0fc7 AS krec
 COPY --from=build /src/krec /usr/local/bin/krec
 ENTRYPOINT ["krec", "operator"]
