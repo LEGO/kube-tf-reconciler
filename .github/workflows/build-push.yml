@@ -73,7 +73,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           # Keep the layers between runs. A PR run writes to its own cache scope only.
           cache-from: type=gha
           cache-to: type=gha,mode=max
